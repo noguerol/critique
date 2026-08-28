@@ -1,5 +1,5 @@
 {
-  "name": "@noguerol/critique",
+  "name": "pi-critique-model",
   "version": "1.0.0",
   "description": "A pi extension that reviews the last work step with a separate model and feeds the review back to the working model as advisory feedback. Independent reviewer with tool-free analysis, structured Markdown verdict (APPROVED / APPROVED_WITH_SUGGESTIONS / CHANGES_RECOMMENDED) and a token-budgeted context.",
   "keywords": [

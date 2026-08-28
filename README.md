@@ -36,7 +36,7 @@ pi install git:github.com/noguerol/critique
 pi install git:github.com/noguerol/critique@v1.0.0
 
 # From npm
-pi install npm:@noguerol/critique
+pi install npm:pi-critique-model
 
 # Local checkout (development)
 pi install /path/to/critique
@@ -47,7 +47,7 @@ pi -e git:github.com/noguerol/critique
 
 ```bash
 pi list                      # show installed packages
-pi remove npm:@noguerol/critique
+pi remove npm:pi-critique-model
 ```
 
 > **Security:** pi packages run with full system access — extensions execute arbitrary code. Install only packages you trust and review the source.

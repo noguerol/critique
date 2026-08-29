@@ -12,36 +12,23 @@ import { type Message, type Model, uuidv7 } from "@earendil-works/pi-ai";
 const MAX_REVIEW_CHARS = 16_000;
 
 export const REVIEWER_SYSTEM_PROMPT = [
-  "You are an independent code reviewer. Another agent just performed work in a project session, and your job is to judge whether that work is correct and whether it can be improved.",
-  "You have no tools: base your review exclusively on the work step provided below.",
-  "",
-  "Review for:",
-  "1. Correctness — does the work satisfy the user's request? Are there bugs, errors, or gaps?",
-  "2. Robustness — edge cases, error handling, security, and failure modes.",
-  "3. Maintainability — naming, structure, duplication, readability, and consistency.",
-  "4. Efficiency — wasted work, repeated computation, or unnecessarily large changes.",
-  "",
-  "Be specific and concrete. Reference the actual tool calls and results (files, lines, commands) from the work step. Do not invent issues: if the work is correct, say so and keep suggestions minimal.",
-  "If the work step was truncated, note it and review only what is visible.",
-  "",
-  "Reply using EXACTLY this Markdown structure:",
-  "",
+  "Independent code reviewer. No tools; judge only given work step.",
+  "Check: correctness, robustness/security, maintainability, efficiency.",
+  "Concrete refs: files/lines/cmds/tool results. No invented issues. If OK, say OK. If truncated, note limits.",
+  "Markdown exactly:",
   "## Verdict",
   "APPROVED | APPROVED_WITH_SUGGESTIONS | CHANGES_RECOMMENDED",
-  "",
   "## Issues",
   "- [severity: critical|major|minor] description",
-  "",
   "## Suggestions",
-  "- concrete, actionable suggestion",
-  "",
+  "- action",
   "## Summary",
-  "2-4 sentence overall assessment.",
+  "2-4 sentences.",
 ].join("\n");
 
 export function buildReviewPrompt(workText: string, focusNote: string): string {
   const sections: string[] = [];
-  sections.push("Review the most recent work performed in this project session.");
+  sections.push("Review latest project work.");
   sections.push("");
   sections.push("<work-step>");
   sections.push(workText);
@@ -51,7 +38,7 @@ export function buildReviewPrompt(workText: string, focusNote: string): string {
     sections.push("<focus-note>");
     sections.push(focusNote);
     sections.push("</focus-note>");
-    sections.push("Pay special attention to the focus note above, but do not limit your review to it.");
+    sections.push("Prioritize focus; still review all.");
   }
   return sections.join("\n");
 }
@@ -61,7 +48,7 @@ export function buildReviewPrompt(workText: string, focusNote: string): string {
  */
 export async function runCritique(
   ctx: ExtensionContext,
-  model: Model,
+  model: Model<any>,
   workText: string,
   focusNote: string,
   signal?: AbortSignal,
@@ -102,11 +89,11 @@ export async function runCritique(
  */
 export function buildInjectedMessage(critiqueModel: string, review: string): string {
   return [
-    "[Critique — advisory review of your last work step]",
+    "[Critique — advisory]",
     "",
-    `A separate reviewer model (\`${critiqueModel}\`) reviewed the work you just performed. This feedback is **advisory, not mandatory**: you are the final judge. Apply only the points that genuinely improve the work, and if you disagree with any of them, briefly explain why and continue.`,
+    `Reviewer: \`${critiqueModel}\`. Advice only: apply useful points; briefly reject bad ones.`,
     "",
-    "--- Review ---",
+    "---",
     "",
     review,
   ].join("\n");

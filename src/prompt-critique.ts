@@ -27,6 +27,12 @@ export const AUTO_PROMPT_CRITIQUE_TIMEOUT_MS = 30_000;
 
 const MAX_PROMPT_CHARS = 8_000;
 const MAX_CRITIQUE_CHARS = 180;
+const MAX_SOLUTION_CHARS = 240;
+
+export interface AutoPromptCritiqueAdvice {
+  critique: string;
+  solution: string;
+}
 
 const LEVEL_GUIDANCE: Record<AutoPromptCritiqueLevel, string> = {
   inconsistencies: "Only clear contradiction/gap/dangerous ambiguity. Skip merely broad/imperfect prompts.",
@@ -54,7 +60,11 @@ export function isPromptCritiqueCandidate(text: string, hasImages = false): bool
   const trimmed = text.trim();
   if (!trimmed) return false;
   if (trimmed.startsWith("/") || trimmed.startsWith("!")) return false;
-  if (trimmed.includes("[Critique accepted by the user]") || trimmed.includes("[User reply to Critique]")) {
+  if (
+    trimmed.includes("[Critique accepted by the user]") ||
+    trimmed.includes("[Critique solution accepted by the user]") ||
+    trimmed.includes("[User reply to Critique]")
+  ) {
     return false;
   }
 
@@ -99,10 +109,10 @@ export const AUTO_PROMPT_CRITIQUE_SYSTEM_PROMPT = [
   "Critique user instructions before an AI coding agent runs.",
   "Skip: ack, tiny cmd, simple correction, too-small prompt.",
   "Show only if advice materially improves prompt / lowers risk / exposes flaw.",
-  "User language. 1 sentence. ≤20 words. ≤160 chars.",
-  "Only top issue. No preamble/bullets/list/hedging.",
+  "If true, include critique + solution. Solution = concrete prompt adjustment, not task answer. User language. Each 1 sentence.",
+  "Critique ≤20w/160c. Solution ≤30w/220c. Only top issue + fix. No preamble/bullets/list/hedging.",
   "JSON only:",
-  '{"shouldCritique":true|false,"critique":"text|"}',
+  '{"shouldCritique":true|false,"critique":"text|","solution":"text|"}',
 ].join("\n");
 
 export function buildAutoPromptCritiquePrompt(
@@ -124,7 +134,9 @@ export function buildAutoPromptCritiquePrompt(
   ].join("\n");
 }
 
-function parseCritiqueJson(text: string): { shouldCritique: boolean; critique: string } | null {
+function parseCritiqueJson(
+  text: string,
+): { shouldCritique: boolean; critique: string; solution: string } | null {
   const trimmed = text.trim();
   const candidates = [trimmed, trimmed.match(/\{[\s\S]*\}/)?.[0]].filter(
     (candidate): candidate is string => !!candidate,
@@ -132,9 +144,16 @@ function parseCritiqueJson(text: string): { shouldCritique: boolean; critique: s
 
   for (const candidate of candidates) {
     try {
-      const parsed = JSON.parse(candidate) as { shouldCritique?: unknown; critique?: unknown };
-      const critique = typeof parsed.critique === "string" ? parsed.critique.trim() : "";
-      return { shouldCritique: parsed.shouldCritique === true, critique };
+      const parsed = JSON.parse(candidate) as {
+        shouldCritique?: unknown;
+        critique?: unknown;
+        solution?: unknown;
+      };
+      return {
+        shouldCritique: parsed.shouldCritique === true,
+        critique: typeof parsed.critique === "string" ? parsed.critique.trim() : "",
+        solution: typeof parsed.solution === "string" ? parsed.solution.trim() : "",
+      };
     } catch {
       // Try the next candidate.
     }
@@ -142,14 +161,14 @@ function parseCritiqueJson(text: string): { shouldCritique: boolean; critique: s
   return null;
 }
 
-function compactCritique(text: string): string {
+function compactOneSentence(text: string, max: number): string {
   const oneLine = text.replace(/\s+/g, " ").replace(/^[-*•]\s*/, "").trim();
   const firstSentence = oneLine.split(/(?<=[.!?。！？])\s+/u)[0]?.trim() ?? oneLine;
-  if (firstSentence.length <= MAX_CRITIQUE_CHARS) return firstSentence;
+  if (firstSentence.length <= max) return firstSentence;
 
-  const clipped = firstSentence.slice(0, MAX_CRITIQUE_CHARS - 1);
+  const clipped = firstSentence.slice(0, max - 1);
   const boundary = Math.max(clipped.lastIndexOf(" "), clipped.lastIndexOf(";"), clipped.lastIndexOf(","));
-  return `${(boundary > 80 ? clipped.slice(0, boundary) : clipped).trim()}…`;
+  return `${(boundary > Math.floor(max * 0.45) ? clipped.slice(0, boundary) : clipped).trim()}…`;
 }
 
 /**
@@ -163,7 +182,7 @@ export async function runAutoPromptCritique(
   level: AutoPromptCritiqueLevel,
   hasImages: boolean,
   signal?: AbortSignal,
-): Promise<string | null> {
+): Promise<AutoPromptCritiqueAdvice | null> {
   const userMessage: Message = {
     role: "user",
     content: [
@@ -195,34 +214,41 @@ export async function runAutoPromptCritique(
     .trim();
 
   const parsed = parseCritiqueJson(raw);
-  if (!parsed?.shouldCritique || !parsed.critique) return null;
+  if (!parsed?.shouldCritique || !parsed.critique || !parsed.solution) return null;
 
-  return compactCritique(parsed.critique);
+  return {
+    critique: compactOneSentence(parsed.critique, MAX_CRITIQUE_CHARS),
+    solution: compactOneSentence(parsed.solution, MAX_SOLUTION_CHARS),
+  };
 }
 
-export function buildAcceptedPromptCritiqueMessage(originalPrompt: string, critique: string): string {
+export function buildAcceptedPromptCritiqueMessage(originalPrompt: string, solution: string): string {
   return [
     originalPrompt,
     "",
-    "[Critique accepted by the user]",
-    "Before acting, account for this short critique of the instruction:",
-    critique,
+    "[Critique solution accepted by the user]",
+    "Apply this pre-flight adjustment before acting:",
+    solution,
   ].join("\n");
 }
 
 export function buildPromptCritiqueReplyMessage(
   originalPrompt: string,
   critique: string,
+  solution: string,
   reply: string,
 ): string {
   return [
     originalPrompt,
     "",
     "[User reply to Critique]",
-    "A short critique was shown before this instruction:",
+    "Critique shown:",
     critique,
     "",
-    "The user's reply/clarification:",
+    "Suggested fix:",
+    solution,
+    "",
+    "User reply/clarification:",
     reply.trim(),
   ].join("\n");
 }

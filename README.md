@@ -159,11 +159,11 @@ The main model then has the freedom to apply, partially apply, or reject each po
 
 When enabled in `/critique config`, Critique listens to user input before prompt-template expansion and before the agent starts. A local heuristic skips acknowledgements, slash commands, tiny corrections, and short commands. For richer instructions, a tool-free model call decides whether there is anything worth challenging.
 
-If critique is useful, pi shows an ultra-short `Critique` widget in the user's interaction language:
+If critique is useful, pi shows an ultra-short `Critique` widget in the user's interaction language. The model always returns both an issue and a proposed fix:
 
-- `Accept` includes the critique as extra guidance for the model.
+- `Accept` includes the proposed fix as extra guidance for the model.
 - `Discard` sends the original prompt unchanged.
-- `Reply` lets the user add a clarification or counterpoint before the model sees the prompt.
+- `Reply` lets the user answer the critique/fix before the model sees the prompt.
 - No interaction within 30 seconds auto-discards the advice and sends the original prompt unchanged.
 
 Automatic prompt critique can use either the active working model or the configured critique model. It does not require a separate model.

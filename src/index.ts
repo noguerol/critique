@@ -214,12 +214,17 @@ function frameBorder(width: number, left: string, right: string, label: string, 
   return color(left + safeLabel + "─".repeat(Math.max(0, innerWidth - safeLabel.length)) + right);
 }
 
+interface PromptCritiqueAdvice {
+  critique: string;
+  solution: string;
+}
+
 async function showPromptCritiqueWidget(
   ctx: ExtensionContext,
-  critique: string,
+  advice: PromptCritiqueAdvice,
 ): Promise<PromptCritiqueAction> {
   if (ctx.mode !== "tui") {
-    ctx.ui.notify(`Critique: ${critique}`, "warning");
+    ctx.ui.notify(`Critique: ${advice.critique}\nFix: ${advice.solution}`, "warning");
     const choice = await ctx.ui.select(
       "Critique (auto-discards in 30s)",
       ["Accept", "Discard", "Reply"],
@@ -257,13 +262,16 @@ async function showPromptCritiqueWidget(
         const color = (s: string) => theme.fg("warning", s);
         const lines: string[] = [];
         lines.push(frameBorder(actualWidth, "╭", "╮", ` Critique (${formatRemaining(remaining)}) `, color));
-        for (const line of wrapPlain(critique, Math.max(10, actualWidth - 4))) {
+        for (const line of wrapPlain(`Issue: ${advice.critique}`, Math.max(10, actualWidth - 4))) {
+          lines.push(frameLine(line, actualWidth, color));
+        }
+        for (const line of wrapPlain(`Fix: ${advice.solution}`, Math.max(10, actualWidth - 4))) {
           lines.push(frameLine(line, actualWidth, color));
         }
         lines.push(frameLine("", actualWidth, color));
         lines.push(
           frameLine(
-            "A accept and include · D/Esc discard advice · R reply/clarify",
+            "A accept fix · D/Esc discard · R reply",
             actualWidth,
             color,
           ),
@@ -307,10 +315,10 @@ async function handleAutomaticPromptCritique(
   const model = resolveAutoPromptCritiqueModel(ctx, config);
   if (!model) return null;
 
-  let critique: string | null = null;
+  let advice: PromptCritiqueAdvice | null = null;
   try {
     ctx.ui.setStatus("critique-check", "critique: checking prompt…");
-    critique = await runAutoPromptCritique(
+    advice = await runAutoPromptCritique(
       ctx,
       model,
       text,
@@ -325,17 +333,17 @@ async function handleAutomaticPromptCritique(
     ctx.ui.setStatus("critique-check", undefined);
   }
 
-  if (!critique) return null;
+  if (!advice) return null;
 
-  const action = await showPromptCritiqueWidget(ctx, critique);
+  const action = await showPromptCritiqueWidget(ctx, advice);
   if (action === "accept") {
-    return buildAcceptedPromptCritiqueMessage(text, critique);
+    return buildAcceptedPromptCritiqueMessage(text, advice.solution);
   }
   if (action === "reply") {
     ctx.ui.notify("Reply/clarify. Empty = discard.", "info");
     const reply = await ctx.ui.editor("Reply to Critique", "");
     if (!reply?.trim()) return null;
-    return buildPromptCritiqueReplyMessage(text, critique, reply);
+    return buildPromptCritiqueReplyMessage(text, advice.critique, advice.solution, reply);
   }
   return null;
 }

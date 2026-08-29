@@ -4,26 +4,26 @@
 
 </div>
 
-# Critique — Adversarial Code Review for pi
+# Critique — Adversarial Review for pi
 
-**Critique reviews the last work step with a separate model and can challenge user instructions before the model starts.** Two thinking machines face off — the working model produced a work step, and an independent reviewer picks it apart for correctness, robustness, maintainability and efficiency. Optionally, Critique also runs a fast pre-flight check on sufficiently rich user prompts and shows a short `Critique` widget when the instruction deserves pushback. The feedback is **non-mandatory**: the user and the working model remain the final judges.
+**Critique questions the last work step with a separate model and can challenge user instructions before the model starts.** It is not limited to code: it can review implementation work, writing, plans, research, data analysis, ops, or any other project work. Optionally, Critique also runs a fast pre-flight check on sufficiently rich user prompts and shows a short `Critique` widget when the instruction deserves pushback. The feedback is **non-mandatory**: the user and the working model remain the final judges.
 
 ---
 
 ## Features
 
-- **Independent reviewer** — a separate model judges the work step from the serialized context, with no tools of its own (can't modify the codebase, can't see your secrets)
+- **Independent reviewer** — a separate model questions the work step from serialized context, with no tools of its own (can't modify files or see hidden state)
 - **Auto-detects the work step** — splits the session branch into *episodes* at user-message boundaries; the last episode containing tool calls or assistant output is the work step
 - **Token-budgeted context** — the user prompt, assistant messages, tool calls and tool results are truncated to a self-contained block so the reviewer sees what it needs without overflow
-- **Multi-step review** — review the last `N` episodes in one shot (`/critique 3`) to catch interactions across steps
-- **Focus note** — `/critique check the error handling` biases the review without limiting it; the reviewer still scans for everything
-- **Structured output** — fixed `Verdict / Issues / Suggestions / Summary` schema so the feedback is always actionable and machine-parseable
+- **Multi-step review** — review the last `N` episodes in one shot (`/critique 3`) to catch cross-step issues
+- **Focus note** — `/critique check the assumptions` biases the review without limiting it; the reviewer still scans for everything
+- **Structured output** — fixed `Verdict / Issues / Suggestions / Summary` schema for actionable, parseable feedback
 - **Settings menu** — `/critique config` opens an editable menu so you can change one setting at a time without rerunning a full wizard
 - **Advisory injection** — on by default; toggle off (or use `/critique view`) to keep the review as read-only
 - **Cancelable loader** — in TUI mode, the review runs behind a loader that you can abort with `Esc`
 - **No provider surprises** — empty reviews are flagged, provider errors are surfaced as errors instead of silently producing nothing
 - **Automatic prompt critique** — optional pre-flight challenge for user instructions before the model starts; trivial inputs (`ok`, tiny commands, quick corrections) are ignored
-- **Three prompt-critique levels** — `Inconsistencies only`, `Critical`, or `Corrosive`, each with a different level of pushback
+- **Three prompt-critique levels** — `Inconsistencies only` (low sensitivity), `Critical` (moderate), or `Corrosive` (high)
 - **Prompt-critique model source** — use either the active working model or the configured critique model
 - **Interactive Critique widget** — ultra-short one-sentence advice in the user's interaction language with `Accept`, `Discard`, or `Reply`; auto-discards after 30 seconds
 - **Persistent config** — `~/.pi/agent/critique.json` stores model choice, auto-inject, and automatic prompt-critique settings across all projects
@@ -56,7 +56,7 @@ pi remove npm:pi-critique-model
 
 > **Security:** pi packages run with full system access — extensions execute arbitrary code. Install only packages you trust and review the source.
 
-**Requirements:** a working pi installation with at least two models configured (one is the *working* model, the other becomes the *reviewer*). Models can be from the same provider as long as they have different IDs.
+**Requirements:** a working pi installation with at least one configured model. For independent reviews, configure a second model as reviewer.
 
 ## Quick Start
 
@@ -66,21 +66,21 @@ pi remove npm:pi-critique-model
 /critique               # review the last work step and feed the feedback back
 ```
 
-The main model then sees the review appended to its next turn and decides what to apply. With auto-inject off (or `/critique view`), the review is only displayed to you — useful when you're just exploring whether to apply changes.
+The main model then sees the review appended to its next turn and decides what to apply. With auto-inject off (or `/critique view`), the review is only displayed to you.
 
 To focus the review:
 
 ```
-/critique check the error handling on the retry logic
+/critique check the assumptions behind the plan
 /critique 3                             # review the last 3 work steps
-/critique 2 look at the test coverage   # combine count + focus
+/critique 2 look at the evidence gaps   # combine count + focus
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `/critique` | Review the last work step and inject the feedback back into the working model |
+| `/critique` | Review/question the last work step and inject feedback into the working model |
 | `/critique <focus>` | Review the last work step with an additional focus note |
 | `/critique N` | Review the last `N` work steps (max 5) |
 | `/critique N <focus>` | Combine count and focus |
@@ -99,7 +99,7 @@ To focus the review:
 
 ### 1. Extract the work step
 
-The session branch is split into *episodes* at user-message boundaries. The last episode containing tool calls or assistant output is the work step: the user request that triggered it, every tool call (with arguments), and every tool result (diffs, command output, errors). Content is truncated to a token budget so the reviewer sees a focused, self-contained context:
+The session branch is split into *episodes* at user-message boundaries. The last episode containing tool calls or assistant output is the work step: the user request that triggered it, every tool call (with arguments), and every tool result (diffs, command output, data, errors). Content is truncated to a token budget so the reviewer sees focused, self-contained context:
 
 | Field | Max chars |
 |-------|-----------|
@@ -113,11 +113,11 @@ Truncated content is marked with `… [truncated]` so the reviewer can tell what
 
 ### 2. Ask the reviewer
 
-The critique model is called directly through `ctx.modelRegistry.complete()` with **no tools** — it only judges. The reviewer is told:
+The critique model is called directly through `ctx.modelRegistry.complete()` with **no tools** — it only judges/questions. The reviewer is told:
 
 - The work step inside `<work-step>` tags
 - An optional `<focus-note>` if you passed one
-- "Do not invent issues: if the work is correct, say so and keep suggestions minimal"
+- "Do not invent issues: if the work is sound, say so and keep suggestions minimal"
 
 It replies in a fixed Markdown structure:
 
@@ -135,21 +135,19 @@ APPROVED | APPROVED_WITH_SUGGESTIONS | CHANGES_RECOMMENDED
 2-4 sentence overall assessment.
 ```
 
-The reviewer is also told explicitly to base its judgment *only* on the provided work step, so a reviewer on a smaller/cheaper model still gives useful feedback.
+The reviewer is told to base its judgment *only* on the provided work step, across any domain: code, writing, planning, research, data, ops, etc.
 
 ### 3. Inject the feedback
 
 The review is sent back to the working model as a follow-up user message:
 
 ```
-[Critique — advisory review of your last work step]
+[Critique — advisory]
 
-A separate reviewer model (`provider/model`) reviewed the work you just
-performed. This feedback is **advisory, not mandatory**: you are the final
-judge. Apply only the points that genuinely improve the work, and if you
-disagree with any of them, briefly explain why and continue.
+Reviewer: `provider/model`. Advice only: apply useful points; briefly reject bad ones.
 
---- Review ---
+---
+
 <the review>
 ```
 
@@ -197,7 +195,7 @@ The config is persisted as JSON at `~/.pi/agent/critique.json`:
 - **`model`** — canonical `provider/modelId` of the reviewer. Empty string = Auto (different from working model).
 - **`autoInject`** — when `true`, the review is injected back into the working model. When `false`, the review is only displayed.
 - **`autoPromptCritique`** — when `true`, sufficiently rich user instructions are challenged before the model starts.
-- **`autoPromptCritiqueLevel`** — `inconsistencies`, `critical`, or `corrosive`.
+- **`autoPromptCritiqueLevel`** — `inconsistencies` only flags real misunderstanding risks; `critical` is moderate; `corrosive` is highly sensitive and skips only clearly logical/complete prompts.
 - **`autoPromptCritiqueModel`** — `working` uses the active model; `critique` uses the configured critique model.
 
 The settings menu offers any model with configured auth that's available in pi's registry; the config persists per-machine (in `getAgentDir()`), shared across all projects.
@@ -225,14 +223,14 @@ Five-file extension with zero external dependencies (only pi's bundled `@earendi
 
 - **Episode splitter** — splits a session branch into user-message-bounded episodes, picks the last one with work
 - **Token budgeter** — hard caps per field, marks truncations so the reviewer knows what it didn't see
-- **Reviewer call** — tool-free `ctx.modelRegistry.complete()` with a structured system prompt
+- **Reviewer call** — tool-free `ctx.modelRegistry.complete()` with a domain-general structured prompt
 - **Advisory formatter** — wraps the review in a "non-mandatory" envelope before injecting as a follow-up user message
 - **Prompt critique** — optional input hook with local trivial-prompt gate, three challenge levels, and ultra-short JSON model output
 - **UI** — lazy-loaded pickers/viewers/loaders + 30-second Critique widget
 
 ## Notes
 
-- The critique model runs with **no tools** and never touches the filesystem. It judges purely from the serialized work step (which includes the diffs and outputs of `edit`/`write`/`bash` calls).
+- The critique model runs with **no tools** and never touches the filesystem. It judges purely from the serialized work step, whatever the domain.
 - In TUI mode the review runs behind a cancelable loader (Esc aborts) and `/critique view` opens a scrollable Markdown viewer. Automatic prompt critique appears as a compact `Critique` widget with a 30-second auto-discard timeout. In RPC mode reviews are surfaced through notifications/dialogs; print mode logs manual reviews to stdout and skips automatic prompt critique.
 - Provider errors (bad keys, insufficient balance, rate limit) are surfaced as errors instead of silently producing empty reviews.
 - Reviews are capped at 16,000 chars to keep the injected follow-up reasonable; longer reviews are truncated with `… [review truncated]`.

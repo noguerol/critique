@@ -6,7 +6,7 @@
     "pi-package",
     "review",
     "critique",
-    "code-review",
+    "adversarial-review",
     "prompt-critique"
   ],
   "author": "critique contributors <https://github.com/noguerol>",

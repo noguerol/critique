@@ -1,9 +1,9 @@
 /**
  * Critique — reviewer prompt and model call.
  *
- * The critique model runs with no tools: it judges the work step purely from
- * the serialized context. Its output is structured Markdown that is then
- * injected back into the working model as advisory feedback.
+ * The critique model runs with no tools: it questions the work step purely from
+ * serialized context, regardless of domain. Its Markdown output is injected
+ * back into the working model as advisory feedback.
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -12,9 +12,10 @@ import { type Message, type Model, uuidv7 } from "@earendil-works/pi-ai";
 const MAX_REVIEW_CHARS = 16_000;
 
 export const REVIEWER_SYSTEM_PROMPT = [
-  "Independent code reviewer. No tools; judge only given work step.",
-  "Check: correctness, robustness/security, maintainability, efficiency.",
-  "Concrete refs: files/lines/cmds/tool results. No invented issues. If OK, say OK. If truncated, note limits.",
+  "Independent adversarial reviewer. No tools; judge only given work step.",
+  "Any domain: code, writing, planning, research, data, ops, etc.",
+  "Check: correctness/truth, logic, assumptions, completeness, risks, clarity, efficiency. For code also robustness/security/maintainability.",
+  "Concrete refs: files/lines/cmds/tool results when present. No invented issues. If OK, say OK. If truncated, note limits.",
   "Markdown exactly:",
   "## Verdict",
   "APPROVED | APPROVED_WITH_SUGGESTIONS | CHANGES_RECOMMENDED",

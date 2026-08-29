@@ -35,9 +35,12 @@ export interface AutoPromptCritiqueAdvice {
 }
 
 const LEVEL_GUIDANCE: Record<AutoPromptCritiqueLevel, string> = {
-  inconsistencies: "Only clear contradiction/gap/dangerous ambiguity. Skip merely broad/imperfect prompts.",
-  critical: "Challenge assumptions, criteria, scope, priority, risk.",
-  corrosive: "Blunt/adversarial. Expose weak logic, trade-offs, overreach, vagueness, self-defeat.",
+  inconsistencies:
+    "Low sensitivity. True contradiction/gap/ambiguity likely to make model misunderstand. Otherwise skip.",
+  critical:
+    "Moderate sensitivity. Flag meaningful ambiguity, missing criteria, risky assumption, weak priority/scope.",
+  corrosive:
+    "High sensitivity. Hunt weak logic/inconsistency/vagueness/overreach. Skip only clearly logical+complete prompts.",
 };
 
 export function autoPromptCritiqueLevelLabel(level: AutoPromptCritiqueLevel): string {
@@ -56,7 +59,11 @@ export function autoPromptCritiqueModelSourceLabel(source: AutoPromptCritiqueMod
 }
 
 /** Fast local gate: avoid paying a model call for acknowledgements and tiny commands. */
-export function isPromptCritiqueCandidate(text: string, hasImages = false): boolean {
+export function isPromptCritiqueCandidate(
+  text: string,
+  hasImages = false,
+  level: AutoPromptCritiqueLevel = "critical",
+): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
   if (trimmed.startsWith("/") || trimmed.startsWith("!")) return false;
@@ -100,6 +107,18 @@ export function isPromptCritiqueCandidate(text: string, hasImages = false): bool
   const wordCount = words.length;
   const charCount = trimmed.length;
 
+  if (level === "corrosive") {
+    if (hasImages && charCount >= 35 && wordCount >= 5) return true;
+    if (trimmed.includes("\n") && charCount >= 70 && wordCount >= 8) return true;
+    return charCount >= 35 && wordCount >= 6;
+  }
+
+  if (level === "inconsistencies") {
+    if (hasImages && charCount >= 90 && wordCount >= 12) return true;
+    if (trimmed.includes("\n") && charCount >= 160 && wordCount >= 16) return true;
+    return charCount >= 90 && wordCount >= 14;
+  }
+
   if (hasImages && charCount >= 60 && wordCount >= 8) return true;
   if (trimmed.includes("\n") && charCount >= 120 && wordCount >= 12) return true;
   return charCount >= 55 && wordCount >= 9;
@@ -108,7 +127,7 @@ export function isPromptCritiqueCandidate(text: string, hasImages = false): bool
 export const AUTO_PROMPT_CRITIQUE_SYSTEM_PROMPT = [
   "Critique user instructions before an AI coding agent runs.",
   "Skip: ack, tiny cmd, simple correction, too-small prompt.",
-  "Show only if advice materially improves prompt / lowers risk / exposes flaw.",
+  "Sensitivity comes from level-guidance. Respect it strictly.",
   "If true, include critique + solution. Solution = concrete prompt adjustment, not task answer. User language. Each 1 sentence.",
   "Critique ≤20w/160c. Solution ≤30w/220c. Only top issue + fix. No preamble/bullets/list/hedging.",
   "JSON only:",

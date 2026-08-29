@@ -1,9 +1,9 @@
 /**
- * Critique — a pi extension that reviews the last work step with a separate
+ * Critique — a pi extension that questions the last work step with a separate
  * model and feeds the review back to the working model as advisory feedback.
  *
  * Commands:
- *   /critique                Review the last work step and inject the feedback
+ *   /critique                Question the last work step and inject feedback
  *   /critique <focus>        ... focusing the review on <focus>
  *   /critique N              ... reviewing the last N work steps (max 5)
  *   /critique view [N]       Show the review only, without injecting it
@@ -310,7 +310,7 @@ async function handleAutomaticPromptCritique(
     runAutoPromptCritique,
   } = await import("./prompt-critique.ts");
 
-  if (!isPromptCritiqueCandidate(text, (images?.length ?? 0) > 0)) return null;
+  if (!isPromptCritiqueCandidate(text, (images?.length ?? 0) > 0, config.autoPromptCritiqueLevel)) return null;
 
   const model = resolveAutoPromptCritiqueModel(ctx, config);
   if (!model) return null;
@@ -507,17 +507,17 @@ async function editPromptCritiqueLevel(
     {
       value: "inconsistencies",
       label: autoPromptCritiqueLevelLabel("inconsistencies"),
-      description: "contradictions/gaps only",
+      description: "low; real mismatch only",
     },
     {
       value: "critical",
       label: autoPromptCritiqueLevelLabel("critical"),
-      description: "assumptions/scope/risks",
+      description: "moderate; real risk",
     },
     {
       value: "corrosive",
       label: autoPromptCritiqueLevelLabel("corrosive"),
-      description: "blunt/adversarial",
+      description: "high; skip only if solid",
     },
   ];
   const choice = await chooseConfigItem(
@@ -619,7 +619,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("critique", {
-    description: "Critique last work / config",
+    description: "Question last work / config",
     getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
       const items: AutocompleteItem[] = [
         { value: "config", label: "config" },

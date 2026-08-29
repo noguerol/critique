@@ -7,28 +7,20 @@
  *   /critique <focus>        ... focusing the review on <focus>
  *   /critique N              ... reviewing the last N work steps (max 5)
  *   /critique view [N]       Show the review only, without injecting it
- *   /critique config         Choose the critique model from pi's active models
+ *   /critique config         Configure review and automatic prompt critique
  */
 
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
-import {
-  BorderedLoader,
-  DynamicBorder,
-  getMarkdownTheme,
-  getSelectListTheme,
-} from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem, SelectItem } from "@earendil-works/pi-tui";
-import { Container, Markdown, matchesKey, SelectList, Spacer, Text } from "@earendil-works/pi-tui";
 
 import {
   loadConfig,
   modelLabel,
   pickableModels,
+  resolveAutoPromptCritiqueModel,
   resolveCritiqueModel,
   saveConfig,
 } from "./config.ts";
-import { extractWorkSteps, formatWorkSteps } from "./work-step.ts";
-import { buildInjectedMessage, runCritique } from "./review.ts";
 
 type Mode = "config" | "review" | "view";
 
@@ -73,8 +65,9 @@ async function runWithLoader(
       return null;
     }
   }
-  return ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-    const loader = new BorderedLoader(tui, theme, "Running critique...");
+  return ctx.ui.custom<string | null>(async (tui, theme, _kb, done) => {
+    const { BorderedLoader } = await import("@earendil-works/pi-coding-agent");
+    const loader = new BorderedLoader(tui, theme, "Critiquing…");
     loader.onAbort = () => done(null);
     task(loader.signal)
       .then((result) => done(result))
@@ -86,23 +79,49 @@ async function runWithLoader(
   });
 }
 
-/** How many models the picker shows at once; it scrolls beyond that. */
+type AutoPromptCritiqueLevel = ReturnType<typeof loadConfig>["autoPromptCritiqueLevel"];
+type AutoPromptCritiqueModelSource = ReturnType<typeof loadConfig>["autoPromptCritiqueModel"];
+type PromptCritiqueAction = "accept" | "discard" | "reply";
+
 const MAX_VISIBLE_MODELS = 10;
+const PROMPT_CRITIQUE_TIMEOUT_MS = 30_000;
+
+function autoPromptCritiqueLevelLabel(level: AutoPromptCritiqueLevel): string {
+  return level === "inconsistencies" ? "Inconsistencies" : level === "critical" ? "Critical" : "Corrosive";
+}
+
+function autoPromptCritiqueModelSourceLabel(source: AutoPromptCritiqueModelSource): string {
+  return source === "working" ? "Working" : "Critique";
+}
+
+function updateCritiqueStatus(ctx: ExtensionContext): void {
+  if (!ctx.hasUI) return;
+  const config = loadConfig();
+  ctx.ui.setStatus(
+    "critique",
+    config.autoPromptCritique ? `critique:${autoPromptCritiqueLevelLabel(config.autoPromptCritiqueLevel)}` : undefined,
+  );
+}
 
 /**
  * Paginated model picker (TUI only). Shows at most MAX_VISIBLE_MODELS entries
  * at a time with a scroll indicator; ↑/↓ move, Enter selects, Esc cancels.
  */
-function pickModel(
+async function pickModel(
   ctx: ExtensionCommandContext,
   title: string,
   items: SelectItem[],
   preselect?: string,
 ): Promise<string | undefined> {
+  const [{ DynamicBorder, getSelectListTheme }, { Container, SelectList, Spacer, Text }] = await Promise.all([
+    import("@earendil-works/pi-coding-agent"),
+    import("@earendil-works/pi-tui"),
+  ]);
+
   return ctx.ui.custom<string | undefined>((_tui, theme, _kb, done) => {
     const list = new SelectList(items, MAX_VISIBLE_MODELS, getSelectListTheme(), {
-      minPrimaryColumnWidth: 24,
-      maxPrimaryColumnWidth: 48,
+      minPrimaryColumnWidth: 18,
+      maxPrimaryColumnWidth: 42,
     });
     list.onSelect = (item) => done(item.value);
     list.onCancel = () => done(undefined);
@@ -115,7 +134,7 @@ function pickModel(
     const border = new DynamicBorder((s: string) => theme.fg("accent", s));
     container.addChild(border);
     container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
-    container.addChild(new Text(theme.fg("dim", "↑/↓ move · Enter select · Esc cancel"), 1, 0));
+    container.addChild(new Text(theme.fg("dim", "↑↓ move · Enter · Esc"), 1, 0));
     container.addChild(new Spacer(1));
     container.addChild(list);
     container.addChild(new Spacer(1));
@@ -131,6 +150,11 @@ function pickModel(
 
 /** Show the review in a scrollable markdown viewer (TUI only). */
 async function showMarkdown(ctx: ExtensionCommandContext, title: string, markdown: string): Promise<void> {
+  const [{ DynamicBorder, getMarkdownTheme }, { Container, Markdown, Text, matchesKey }] = await Promise.all([
+    import("@earendil-works/pi-coding-agent"),
+    import("@earendil-works/pi-tui"),
+  ]);
+
   await ctx.ui.custom((_tui, theme, _kb, done) => {
     const container = new Container();
     const border = new DynamicBorder((s: string) => theme.fg("accent", s));
@@ -139,7 +163,7 @@ async function showMarkdown(ctx: ExtensionCommandContext, title: string, markdow
     container.addChild(border);
     container.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
     container.addChild(new Markdown(markdown, 1, 1, mdTheme));
-    container.addChild(new Text(theme.fg("dim", "Press Enter or Esc to close"), 1, 0));
+    container.addChild(new Text(theme.fg("dim", "Enter/Esc close"), 1, 0));
     container.addChild(border);
 
     return {
@@ -152,6 +176,168 @@ async function showMarkdown(ctx: ExtensionCommandContext, title: string, markdow
       },
     };
   });
+}
+
+function formatRemaining(ms: number): string {
+  return `${Math.max(0, Math.ceil(ms / 1000))}s`;
+}
+
+function clip(text: string, width: number): string {
+  return text.length <= width ? text : `${text.slice(0, Math.max(0, width - 1))}…`;
+}
+
+function wrapPlain(text: string, width: number): string[] {
+  const words = text.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let line = "";
+  for (const word of words) {
+    if (!line) line = word;
+    else if (line.length + word.length + 1 <= width) line += ` ${word}`;
+    else {
+      lines.push(clip(line, width));
+      line = word;
+    }
+  }
+  if (line) lines.push(clip(line, width));
+  return lines.length > 0 ? lines : [""];
+}
+
+function frameLine(text: string, width: number, color: (s: string) => string): string {
+  const innerWidth = Math.max(10, width - 4);
+  const clipped = clip(text, innerWidth);
+  return color("│ ") + clipped + " ".repeat(Math.max(0, innerWidth - clipped.length)) + color(" │");
+}
+
+function frameBorder(width: number, left: string, right: string, label: string, color: (s: string) => string): string {
+  const innerWidth = Math.max(10, width - 2);
+  const safeLabel = clip(label, Math.max(0, innerWidth - 1));
+  return color(left + safeLabel + "─".repeat(Math.max(0, innerWidth - safeLabel.length)) + right);
+}
+
+async function showPromptCritiqueWidget(
+  ctx: ExtensionContext,
+  critique: string,
+): Promise<PromptCritiqueAction> {
+  if (ctx.mode !== "tui") {
+    ctx.ui.notify(`Critique: ${critique}`, "warning");
+    const choice = await ctx.ui.select(
+      "Critique (auto-discards in 30s)",
+      ["Accept", "Discard", "Reply"],
+      { timeout: PROMPT_CRITIQUE_TIMEOUT_MS },
+    );
+    if (choice === "Accept") return "accept";
+    if (choice === "Reply") return "reply";
+    return "discard";
+  }
+
+  const { matchesKey } = await import("@earendil-works/pi-tui");
+
+  return ctx.ui.custom<PromptCritiqueAction>((tui, theme, _kb, done) => {
+    const started = Date.now();
+    let remaining = PROMPT_CRITIQUE_TIMEOUT_MS;
+    let closed = false;
+
+    const finish = (action: PromptCritiqueAction) => {
+      if (closed) return;
+      closed = true;
+      clearInterval(interval);
+      clearTimeout(timeout);
+      done(action);
+    };
+
+    const timeout = setTimeout(() => finish("discard"), PROMPT_CRITIQUE_TIMEOUT_MS);
+    const interval = setInterval(() => {
+      remaining = PROMPT_CRITIQUE_TIMEOUT_MS - (Date.now() - started);
+      tui.requestRender();
+    }, 250);
+
+    return {
+      render: (width: number) => {
+        const actualWidth = Math.max(20, Math.min(width, 100));
+        const color = (s: string) => theme.fg("warning", s);
+        const lines: string[] = [];
+        lines.push(frameBorder(actualWidth, "╭", "╮", ` Critique (${formatRemaining(remaining)}) `, color));
+        for (const line of wrapPlain(critique, Math.max(10, actualWidth - 4))) {
+          lines.push(frameLine(line, actualWidth, color));
+        }
+        lines.push(frameLine("", actualWidth, color));
+        lines.push(
+          frameLine(
+            "A accept and include · D/Esc discard advice · R reply/clarify",
+            actualWidth,
+            color,
+          ),
+        );
+        lines.push(frameBorder(actualWidth, "╰", "╯", "", color));
+        return lines;
+      },
+      invalidate: () => {},
+      handleInput: (data: string) => {
+        if (data === "a" || data === "A" || matchesKey(data, "enter")) finish("accept");
+        else if (data === "r" || data === "R") finish("reply");
+        else if (data === "d" || data === "D" || matchesKey(data, "escape")) finish("discard");
+        tui.requestRender();
+      },
+      dispose: () => {
+        clearInterval(interval);
+        clearTimeout(timeout);
+      },
+    };
+  }, { overlay: true, overlayOptions: { anchor: "bottom-center", width: "90%", minWidth: 20 } });
+}
+
+async function handleAutomaticPromptCritique(
+  ctx: ExtensionContext,
+  text: string,
+  images: unknown[] | undefined,
+): Promise<string | null> {
+  const config = loadConfig();
+  if (!config.autoPromptCritique) return null;
+  if (!ctx.hasUI) return null;
+
+  const {
+    buildAcceptedPromptCritiqueMessage,
+    buildPromptCritiqueReplyMessage,
+    isPromptCritiqueCandidate,
+    runAutoPromptCritique,
+  } = await import("./prompt-critique.ts");
+
+  if (!isPromptCritiqueCandidate(text, (images?.length ?? 0) > 0)) return null;
+
+  const model = resolveAutoPromptCritiqueModel(ctx, config);
+  if (!model) return null;
+
+  let critique: string | null = null;
+  try {
+    ctx.ui.setStatus("critique-check", "critique: checking prompt…");
+    critique = await runAutoPromptCritique(
+      ctx,
+      model,
+      text,
+      config.autoPromptCritiqueLevel,
+      (images?.length ?? 0) > 0,
+      ctx.signal,
+    );
+  } catch (error) {
+    ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+    return null;
+  } finally {
+    ctx.ui.setStatus("critique-check", undefined);
+  }
+
+  if (!critique) return null;
+
+  const action = await showPromptCritiqueWidget(ctx, critique);
+  if (action === "accept") {
+    return buildAcceptedPromptCritiqueMessage(text, critique);
+  }
+  if (action === "reply") {
+    ctx.ui.notify("Reply/clarify. Empty = discard.", "info");
+    const reply = await ctx.ui.editor("Reply to Critique", "");
+    if (!reply?.trim()) return null;
+    return buildPromptCritiqueReplyMessage(text, critique, reply);
+  }
+  return null;
 }
 
 async function runReview(pi: ExtensionAPI, ctx: ExtensionCommandContext, parsed: ParsedArgs): Promise<void> {
@@ -167,9 +353,14 @@ async function runReview(pi: ExtensionAPI, ctx: ExtensionCommandContext, parsed:
     return;
   }
 
+  const [{ extractWorkSteps, formatWorkSteps }, { buildInjectedMessage, runCritique }] = await Promise.all([
+    import("./work-step.ts"),
+    import("./review.ts"),
+  ]);
+
   const steps = extractWorkSteps(branch, parsed.count);
   if (steps.length === 0) {
-    ctx.ui.notify("No work step found — the session has no assistant tool activity to review.", "warning");
+    ctx.ui.notify("No reviewable work step.", "warning");
     return;
   }
   if (steps.length < parsed.count) {
@@ -178,12 +369,12 @@ async function runReview(pi: ExtensionAPI, ctx: ExtensionCommandContext, parsed:
 
   const model = resolveCritiqueModel(ctx, config);
   if (!model) {
-    ctx.ui.notify("No critique model available (none with configured auth). Run /critique config to pick one.", "error");
+    ctx.ui.notify("No critique model. Use /critique config.", "error");
     return;
   }
 
   if (ctx.model && modelLabel(model) === modelLabel(ctx.model)) {
-    ctx.ui.notify("Note: the critique model is the same as the working model. Run /critique config to pick a different one.", "warning");
+    ctx.ui.notify("Critique model = working model. Use /critique config to change.", "warning");
   }
 
   const workText = formatWorkSteps(steps);
@@ -215,31 +406,77 @@ async function runReview(pi: ExtensionAPI, ctx: ExtensionCommandContext, parsed:
   ctx.ui.notify(`Critique feedback from ${label} sent back to the working model.`, "info");
 }
 
-async function handleConfig(ctx: ExtensionCommandContext): Promise<void> {
-  if (!ctx.hasUI) {
-    ctx.ui.notify("/critique config requires interactive or RPC mode.", "error");
-    return;
-  }
+async function chooseConfigItem(
+  ctx: ExtensionCommandContext,
+  title: string,
+  items: SelectItem[],
+  preselect?: string,
+): Promise<string | undefined> {
+  if (ctx.mode === "tui") return pickModel(ctx, title, items, preselect);
 
-  const config = loadConfig();
-  const models = pickableModels(ctx);
+  const labels = items.map((item) => `${item.label}${item.description ? ` (${item.description})` : ""}`);
+  const choice = await ctx.ui.select(title, labels);
+  if (choice === undefined) return undefined;
+  return items.find((item) => `${item.label}${item.description ? ` (${item.description})` : ""}` === choice)?.value;
+}
 
-  const currentModel = config.model || "auto (a different model than the working one)";
-  ctx.ui.notify(
-    `Critique config — model: ${currentModel} | auto-inject: ${config.autoInject ? "on" : "off"}`,
-    "info",
-  );
+function configSummary(config: ReturnType<typeof loadConfig>): string {
+  const promptCritique = config.autoPromptCritique
+    ? `${autoPromptCritiqueLevelLabel(config.autoPromptCritiqueLevel)} via ${autoPromptCritiqueModelSourceLabel(config.autoPromptCritiqueModel)}`
+    : "off";
+  return `model:${config.model || "auto"} | inject:${config.autoInject ? "on" : "off"} | prompt:${promptCritique}`;
+}
 
+function configMenuItems(config: ReturnType<typeof loadConfig>): SelectItem[] {
+  return [
+    {
+      value: "model",
+      label: "Critique model",
+      description: config.model || "auto; prefer non-working",
+    },
+    {
+      value: "autoInject",
+      label: "Auto-inject",
+      description: config.autoInject ? "on" : "off",
+    },
+    {
+      value: "autoPromptCritique",
+      label: "Prompt critique",
+      description: config.autoPromptCritique ? "on" : "off",
+    },
+    {
+      value: "autoPromptCritiqueLevel",
+      label: "Prompt level",
+      description: autoPromptCritiqueLevelLabel(config.autoPromptCritiqueLevel),
+    },
+    {
+      value: "autoPromptCritiqueModel",
+      label: "Prompt model",
+      description: autoPromptCritiqueModelSourceLabel(config.autoPromptCritiqueModel),
+    },
+    {
+      value: "done",
+      label: "Done",
+      description: "save; close",
+    },
+  ];
+}
+
+async function editCritiqueModel(
+  ctx: ExtensionCommandContext,
+  config: ReturnType<typeof loadConfig>,
+  models: ReturnType<typeof pickableModels>,
+): Promise<boolean> {
   if (models.length === 0) {
     ctx.ui.notify("No models with configured auth are available to pick.", "error");
-    return;
+    return false;
   }
 
   const items: SelectItem[] = [
     {
       value: "",
       label: "Auto",
-      description: "Different model than the working one (fallback: current model)",
+      description: "prefer non-working; fallback current",
     },
     ...models.map((model) => ({
       value: modelLabel(model),
@@ -248,45 +485,133 @@ async function handleConfig(ctx: ExtensionCommandContext): Promise<void> {
     })),
   ];
 
-  let modelChoice: string | undefined;
-  if (ctx.mode === "tui") {
-    modelChoice = await pickModel(ctx, "Critique model", items, config.model);
-    if (modelChoice === undefined) {
-      ctx.ui.notify("Config cancelled.", "info");
-      return;
-    }
-  } else {
-    // RPC mode: ctx.ui.custom() is unavailable, fall back to the built-in select.
-    const choice = await ctx.ui.select(
-      "Critique model:",
-      items.map((item) => `${item.label} (${item.description})`),
-    );
-    if (choice === undefined) {
-      ctx.ui.notify("Config cancelled.", "info");
-      return;
-    }
-    const selected = items.find((item) => `${item.label} (${item.description})` === choice);
-    modelChoice = selected?.value ?? "";
-  }
+  const modelChoice = await chooseConfigItem(ctx, "Critique model", items, config.model);
+  if (modelChoice === undefined) return false;
   config.model = modelChoice;
+  return true;
+}
 
-  const autoInject = await ctx.ui.confirm(
-    "Auto-inject feedback?",
-    "Inject the critique review back into the working model automatically? Choose No to only display reviews (/critique view always only displays).",
+async function editPromptCritiqueLevel(
+  ctx: ExtensionCommandContext,
+  config: ReturnType<typeof loadConfig>,
+): Promise<boolean> {
+  const levelItems: SelectItem[] = [
+    {
+      value: "inconsistencies",
+      label: autoPromptCritiqueLevelLabel("inconsistencies"),
+      description: "contradictions/gaps only",
+    },
+    {
+      value: "critical",
+      label: autoPromptCritiqueLevelLabel("critical"),
+      description: "assumptions/scope/risks",
+    },
+    {
+      value: "corrosive",
+      label: autoPromptCritiqueLevelLabel("corrosive"),
+      description: "blunt/adversarial",
+    },
+  ];
+  const choice = await chooseConfigItem(
+    ctx,
+    "Automatic prompt critique level",
+    levelItems,
+    config.autoPromptCritiqueLevel,
   );
-  config.autoInject = autoInject;
+  if (choice === undefined) return false;
+  config.autoPromptCritiqueLevel = choice as AutoPromptCritiqueLevel;
+  return true;
+}
+
+async function editPromptCritiqueModel(
+  ctx: ExtensionCommandContext,
+  config: ReturnType<typeof loadConfig>,
+): Promise<boolean> {
+  const sourceItems: SelectItem[] = [
+    {
+      value: "working",
+      label: autoPromptCritiqueModelSourceLabel("working"),
+      description: "active model",
+    },
+    {
+      value: "critique",
+      label: autoPromptCritiqueModelSourceLabel("critique"),
+      description: "configured critic",
+    },
+  ];
+  const choice = await chooseConfigItem(
+    ctx,
+    "Automatic prompt critique model",
+    sourceItems,
+    config.autoPromptCritiqueModel,
+  );
+  if (choice === undefined) return false;
+  config.autoPromptCritiqueModel = choice as AutoPromptCritiqueModelSource;
+  return true;
+}
+
+async function handleConfig(ctx: ExtensionCommandContext): Promise<void> {
+  if (!ctx.hasUI) {
+    ctx.ui.notify("/critique config requires interactive or RPC mode.", "error");
+    return;
+  }
+
+  const config = loadConfig();
+  const models = pickableModels(ctx);
+  let preselect: string | undefined;
+
+  while (true) {
+    const choice = await chooseConfigItem(ctx, "Critique config", configMenuItems(config), preselect);
+    if (choice === undefined || choice === "done") break;
+
+    preselect = choice;
+    let changed = false;
+    switch (choice) {
+      case "model":
+        changed = await editCritiqueModel(ctx, config, models);
+        break;
+      case "autoInject":
+        config.autoInject = !config.autoInject;
+        changed = true;
+        break;
+      case "autoPromptCritique":
+        config.autoPromptCritique = !config.autoPromptCritique;
+        changed = true;
+        break;
+      case "autoPromptCritiqueLevel":
+        changed = await editPromptCritiqueLevel(ctx, config);
+        break;
+      case "autoPromptCritiqueModel":
+        changed = await editPromptCritiqueModel(ctx, config);
+        break;
+    }
+
+    if (changed) {
+      saveConfig(config);
+      updateCritiqueStatus(ctx);
+      ctx.ui.notify(`Critique config saved — ${configSummary(config)}`, "info");
+    }
+  }
 
   saveConfig(config);
-  ctx.ui.notify(
-    `Critique config saved — model: ${config.model || "auto"} | auto-inject: ${config.autoInject ? "on" : "off"}`,
-    "info",
-  );
+  updateCritiqueStatus(ctx);
+  ctx.ui.notify(`Critique config closed — ${configSummary(config)}`, "info");
 }
 
 export default function (pi: ExtensionAPI) {
+  pi.on("session_start", async (_event, ctx) => {
+    updateCritiqueStatus(ctx);
+  });
+
+  pi.on("input", async (event, ctx) => {
+    if (event.source === "extension") return { action: "continue" as const };
+    const transformed = await handleAutomaticPromptCritique(ctx, event.text, event.images);
+    if (!transformed) return { action: "continue" as const };
+    return { action: "transform" as const, text: transformed, images: event.images };
+  });
+
   pi.registerCommand("critique", {
-    description:
-      "Review the last work step with a separate model and feed the feedback back to the working model",
+    description: "Critique last work / config",
     getArgumentCompletions: (prefix: string): AutocompleteItem[] | null => {
       const items: AutocompleteItem[] = [
         { value: "config", label: "config" },

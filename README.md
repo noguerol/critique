@@ -6,7 +6,7 @@
 
 # Critique — Adversarial Code Review for pi
 
-**Critique reviews the last work step with a separate model and feeds the review back to the working model as advisory feedback.** Two thinking machines face off — the working model produced a work step, and an independent reviewer picks it apart for correctness, robustness, maintainability and efficiency. The verdict comes back as structured Markdown: `APPROVED`, `APPROVED_WITH_SUGGESTIONS`, or `CHANGES_RECOMMENDED` — and the working model stays the final judge. The feedback is **non-mandatory**: it applies, partially applies, or rejects each point as it sees fit.
+**Critique reviews the last work step with a separate model and can challenge user instructions before the model starts.** Two thinking machines face off — the working model produced a work step, and an independent reviewer picks it apart for correctness, robustness, maintainability and efficiency. Optionally, Critique also runs a fast pre-flight check on sufficiently rich user prompts and shows a short `Critique` widget when the instruction deserves pushback. The feedback is **non-mandatory**: the user and the working model remain the final judges.
 
 ---
 
@@ -18,11 +18,15 @@
 - **Multi-step review** — review the last `N` episodes in one shot (`/critique 3`) to catch interactions across steps
 - **Focus note** — `/critique check the error handling` biases the review without limiting it; the reviewer still scans for everything
 - **Structured output** — fixed `Verdict / Issues / Suggestions / Summary` schema so the feedback is always actionable and machine-parseable
-- **Independent model picker** — `/critique config` lets you choose the reviewer; the default is a *different* model than the working one, ensuring a genuinely independent perspective
+- **Settings menu** — `/critique config` opens an editable menu so you can change one setting at a time without rerunning a full wizard
 - **Advisory injection** — on by default; toggle off (or use `/critique view`) to keep the review as read-only
 - **Cancelable loader** — in TUI mode, the review runs behind a loader that you can abort with `Esc`
 - **No provider surprises** — empty reviews are flagged, provider errors are surfaced as errors instead of silently producing nothing
-- **Persistent config** — `~/.pi/agent/critique.json` stores the model choice and auto-inject toggle across all projects
+- **Automatic prompt critique** — optional pre-flight challenge for user instructions before the model starts; trivial inputs (`ok`, tiny commands, quick corrections) are ignored
+- **Three prompt-critique levels** — `Inconsistencies only`, `Critical`, or `Corrosive`, each with a different level of pushback
+- **Prompt-critique model source** — use either the active working model or the configured critique model
+- **Interactive Critique widget** — ultra-short one-sentence advice in the user's interaction language with `Accept`, `Discard`, or `Reply`; auto-discards after 30 seconds
+- **Persistent config** — `~/.pi/agent/critique.json` stores model choice, auto-inject, and automatic prompt-critique settings across all projects
 
 ## Install
 
@@ -57,7 +61,7 @@ pi remove npm:pi-critique-model
 ## Quick Start
 
 ```
-/critique config        # (optional) pick a reviewer model — defaults to "different from the working one"
+/critique config        # (optional) open the settings menu
 ...                     # let the main model do some work
 /critique               # review the last work step and feed the feedback back
 ```
@@ -83,7 +87,7 @@ To focus the review:
 | `/critique view` | Show the review only, without injecting it |
 | `/critique view <focus>` | View-only, with a focus note |
 | `/critique view N` | View-only, last `N` steps |
-| `/critique config` | Pick the critique model from pi's native active models and toggle auto-inject |
+| `/critique config` | Open the editable settings menu for model, auto-inject, and automatic prompt critique |
 
 **Argument parsing:**
 
@@ -151,9 +155,24 @@ disagree with any of them, briefly explain why and continue.
 
 The main model then has the freedom to apply, partially apply, or reject each point. If auto-inject is off, the review is only shown to you.
 
+### 4. Optional automatic prompt critique
+
+When enabled in `/critique config`, Critique listens to user input before prompt-template expansion and before the agent starts. A local heuristic skips acknowledgements, slash commands, tiny corrections, and short commands. For richer instructions, a tool-free model call decides whether there is anything worth challenging.
+
+If critique is useful, pi shows an ultra-short `Critique` widget in the user's interaction language:
+
+- `Accept` includes the critique as extra guidance for the model.
+- `Discard` sends the original prompt unchanged.
+- `Reply` lets the user add a clarification or counterpoint before the model sees the prompt.
+- No interaction within 30 seconds auto-discards the advice and sends the original prompt unchanged.
+
+Automatic prompt critique can use either the active working model or the configured critique model. It does not require a separate model.
+
 ## Model Selection
 
-`/critique config` opens the critic model picker. It only offers models with configured auth, **only** from pi's native model registry — the same list you see in `/model`. The picker shows at most ten entries at a time and scrolls past that.
+`/critique config` opens an editable settings menu. Select a setting to change only that value, toggle booleans directly, or choose `Done`/`Esc` to close. Changes are persisted as soon as each setting is edited.
+
+The `Critique model` entry opens the critic model picker. It only offers models with configured auth, **only** from pi's native model registry — the same list you see in `/model`. The picker shows at most ten entries at a time and scrolls past that.
 
 **Auto** (the default) prefers a *different* model than the working one, so the review is genuinely independent. If no second model is available, it falls back to the working model and warns you when it runs.
 
@@ -168,14 +187,20 @@ The config is persisted as JSON at `~/.pi/agent/critique.json`:
 ```json
 {
   "model": "anthropic/claude-sonnet-4",
-  "autoInject": true
+  "autoInject": true,
+  "autoPromptCritique": false,
+  "autoPromptCritiqueLevel": "inconsistencies",
+  "autoPromptCritiqueModel": "working"
 }
 ```
 
 - **`model`** — canonical `provider/modelId` of the reviewer. Empty string = Auto (different from working model).
 - **`autoInject`** — when `true`, the review is injected back into the working model. When `false`, the review is only displayed.
+- **`autoPromptCritique`** — when `true`, sufficiently rich user instructions are challenged before the model starts.
+- **`autoPromptCritiqueLevel`** — `inconsistencies`, `critical`, or `corrosive`.
+- **`autoPromptCritiqueModel`** — `working` uses the active model; `critique` uses the configured critique model.
 
-The picker offers any model with configured auth that's available in pi's registry; the config persists per-machine (in `getAgentDir()`), shared across all projects.
+The settings menu offers any model with configured auth that's available in pi's registry; the config persists per-machine (in `getAgentDir()`), shared across all projects.
 
 ## Architecture
 
@@ -189,24 +214,26 @@ critique/
 │   └── preview.png     # npm pi.dev preview card
 ├── screenshot.png      # full-res master
 └── src/
-    ├── index.ts        # /critique command surface, model picker, review UI (≈300 lines)
-    ├── config.ts       # persistence + model resolution: pinned, auto, fallback (≈90 lines)
-    ├── work-step.ts    # episode splitting + token-budgeted serialization (≈200 lines)
-    └── review.ts       # reviewer prompt + model call + injected-message builder (≈115 lines)
+    ├── index.ts             # /critique command surface, config UI, review UI, input hook
+    ├── config.ts            # persistence + model resolution: pinned, auto, fallback
+    ├── prompt-critique.ts   # automatic user-prompt critique prompt, gate, model call
+    ├── work-step.ts         # episode splitting + token-budgeted serialization
+    └── review.ts            # reviewer prompt + model call + injected-message builder
 ```
 
-Four-file extension with zero external dependencies (only pi's bundled `@earendil-works/*` + Node built-ins):
+Five-file extension with zero external dependencies (only pi's bundled `@earendil-works/*` + Node built-ins):
 
 - **Episode splitter** — splits a session branch into user-message-bounded episodes, picks the last one with work
 - **Token budgeter** — hard caps per field, marks truncations so the reviewer knows what it didn't see
 - **Reviewer call** — tool-free `ctx.modelRegistry.complete()` with a structured system prompt
 - **Advisory formatter** — wraps the review in a "non-mandatory" envelope before injecting as a follow-up user message
-- **UI** — paginated TUI model picker (SelectList) + Markdown review viewer + cancelable BorderedLoader
+- **Prompt critique** — optional input hook with local trivial-prompt gate, three challenge levels, and ultra-short JSON model output
+- **UI** — lazy-loaded pickers/viewers/loaders + 30-second Critique widget
 
 ## Notes
 
 - The critique model runs with **no tools** and never touches the filesystem. It judges purely from the serialized work step (which includes the diffs and outputs of `edit`/`write`/`bash` calls).
-- In TUI mode the review runs behind a cancelable loader (Esc aborts) and `/critique view` opens a scrollable Markdown viewer. In RPC mode reviews are surfaced through notifications; print mode logs them to stdout.
+- In TUI mode the review runs behind a cancelable loader (Esc aborts) and `/critique view` opens a scrollable Markdown viewer. Automatic prompt critique appears as a compact `Critique` widget with a 30-second auto-discard timeout. In RPC mode reviews are surfaced through notifications/dialogs; print mode logs manual reviews to stdout and skips automatic prompt critique.
 - Provider errors (bad keys, insufficient balance, rate limit) are surfaced as errors instead of silently producing empty reviews.
 - Reviews are capped at 16,000 chars to keep the injected follow-up reasonable; longer reviews are truncated with `… [review truncated]`.
 

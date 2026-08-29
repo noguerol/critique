@@ -87,7 +87,7 @@ function toolCallsOf(content: unknown): WorkStepToolCall[] {
 }
 
 function messageOf(entry: SessionEntry): LooseMessage {
-  return entry.message as unknown as LooseMessage;
+  return (entry as { message: unknown }).message as LooseMessage;
 }
 
 function isUserEntry(entry: SessionEntry): boolean {
@@ -167,22 +167,22 @@ export function formatWorkSteps(steps: WorkStep[]): string {
   const sections = steps.map((step, index) => {
     const position = steps.length - index;
     const lines: string[] = [];
-    lines.push(`### Work step ${position}${step.modelLabel ? ` (model: ${step.modelLabel})` : ""}`);
+    lines.push(`### Step ${position}${step.modelLabel ? ` (${step.modelLabel})` : ""}`);
 
     if (step.userPrompt) {
-      lines.push(`\n**User request:**\n${truncateText(step.userPrompt, MAX_USER_PROMPT)}`);
+      lines.push(`\n**User:**\n${truncateText(step.userPrompt, MAX_USER_PROMPT)}`);
     }
     if (step.assistantText) {
-      lines.push(`\n**Assistant messages:**\n${truncateText(step.assistantText, MAX_ASSISTANT_TEXT)}`);
+      lines.push(`\n**Assistant:**\n${truncateText(step.assistantText, MAX_ASSISTANT_TEXT)}`);
     }
     if (step.toolCalls.length > 0) {
-      lines.push(`\n**Tool calls:**`);
+      lines.push(`\n**Calls:**`);
       for (const call of step.toolCalls) {
         lines.push(`- \`${call.name}(${truncateText(call.args, MAX_TOOL_ARGS)})\``);
       }
     }
     if (step.toolResults.length > 0) {
-      lines.push(`\n**Tool results:**`);
+      lines.push(`\n**Results:**`);
       for (const result of step.toolResults) {
         const flag = result.isError ? " (ERROR)" : "";
         lines.push(`- \`${result.toolName}\`${flag}:`);

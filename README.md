@@ -1,6 +1,6 @@
 <div align="center">
 
-![Critique banner](docs/banner.png)
+![Critique banner](docs/banner.jpeg)
 
 </div>
 
@@ -208,9 +208,8 @@ critique/
 ├── LICENSE             # MIT
 ├── README.md
 ├── docs/
-│   ├── banner.png      # wide README header
-│   └── preview.png     # npm pi.dev preview card
-├── screenshot.png      # full-res master
+│   ├── banner.jpeg      # wide README header
+│   └── preview.jpeg     # npm pi.dev preview card
 └── src/
     ├── index.ts             # /critique command surface, config UI, review UI, input hook
     ├── config.ts            # persistence + model resolution: pinned, auto, fallback

@@ -1,6 +1,6 @@
 <div align="center">
 
-![Critique banner](docs/banner.jpeg)
+![Critique banner](https://raw.githubusercontent.com/noguerol/critique/main/docs/banner.jpeg)
 
 </div>
 

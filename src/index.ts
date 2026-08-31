@@ -114,10 +114,10 @@ function updateCritiqueStatus(ctx: ExtensionContext): void {
   const config = loadConfig();
   const parts: string[] = [];
   if (config.autoPromptCritique) {
-    parts.push(`critique:${autoPromptCritiqueLevelLabel(config.autoPromptCritiqueLevel)}`);
+    parts.push("🧠 critique:on");
   }
   if (config.questions) {
-    parts.push(`questions:${questionsFrequencyLabel(config.questionsFrequency)}`);
+    parts.push("❓ questions:on");
   }
   ctx.ui.setStatus("critique", parts.length > 0 ? parts.join(" ") : undefined);
 }

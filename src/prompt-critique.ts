@@ -1,9 +1,12 @@
 /**
- * Critique — automatic user-prompt critique.
+ * Critique — automatic user-prompt critique and questions.
  *
  * This module judges user instructions before the working model receives them.
  * It is intentionally lightweight: a cheap heuristic avoids trivial prompts,
  * then a tool-free model call decides whether there is anything worth showing.
+ *
+ * It also provides the "questions" feature: when user input is ambiguous,
+ * a clarifying widget offers three options (two suggestions + free text).
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -11,6 +14,7 @@ import { type Message, type Model, uuidv7 } from "@earendil-works/pi-ai";
 
 export type AutoPromptCritiqueLevel = "inconsistencies" | "critical" | "corrosive";
 export type AutoPromptCritiqueModelSource = "working" | "critique";
+export type QuestionsFrequency = "essential" | "normal" | "verbose";
 
 export const AUTO_PROMPT_CRITIQUE_LEVELS: AutoPromptCritiqueLevel[] = [
   "inconsistencies",
@@ -34,6 +38,19 @@ export interface AutoPromptCritiqueAdvice {
   solution: string;
 }
 
+export interface QuestionOption {
+  label: string;
+  description: string;
+  value: string;
+}
+
+export interface QuestionResult {
+  /** "a", "b", or "c" */
+  choice: string;
+  /** Free-text answer when choice is "c". */
+  customAnswer: string;
+}
+
 const LEVEL_GUIDANCE: Record<AutoPromptCritiqueLevel, string> = {
   inconsistencies:
     "Low sensitivity. True contradiction/gap/ambiguity likely to make model misunderstand. Otherwise skip.",
@@ -41,6 +58,12 @@ const LEVEL_GUIDANCE: Record<AutoPromptCritiqueLevel, string> = {
     "Moderate sensitivity. Flag meaningful ambiguity, missing criteria, risky assumption, weak priority/scope.",
   corrosive:
     "High sensitivity. Hunt weak logic/inconsistency/vagueness/overreach. Skip only clearly logical+complete prompts.",
+};
+
+const QUESTIONS_FREQUENCY_LABELS: Record<QuestionsFrequency, string> = {
+  essential: "Essential only",
+  normal: "Normal",
+  verbose: "Verbose",
 };
 
 export function autoPromptCritiqueLevelLabel(level: AutoPromptCritiqueLevel): string {
@@ -58,6 +81,111 @@ export function autoPromptCritiqueModelSourceLabel(source: AutoPromptCritiqueMod
   return source === "working" ? "Working model" : "Critique model";
 }
 
+export function questionsFrequencyLabel(freq: QuestionsFrequency): string {
+  return QUESTIONS_FREQUENCY_LABELS[freq];
+}
+
+/**
+ * Detect whether the user's input is ambiguous enough to warrant a
+ * clarifying question. Returns a suggested interpretation pair when one is
+ * found, or null when the input is clear.
+ */
+export function detectAmbiguity(
+  text: string,
+  hasImages: boolean,
+  level: QuestionsFrequency,
+): { interpretationA: string; interpretationB: string } | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  const normalized = trimmed
+    .toLowerCase()
+    .replace(/[.!?¡¿,;:()\[\]{}"'`´]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // Skip trivial/acknowledgement inputs.
+  const bareReplies = new Set([
+    "ok",
+    "okay",
+    "yes",
+    "no",
+    "y",
+    "n",
+    "thanks",
+    "thank you",
+    "gracias",
+    "vale",
+    "sí",
+    "si",
+    "sigue",
+    "continua",
+    "continúa",
+    "continue",
+    "stop",
+    "para",
+    "no hagas eso",
+  ]);
+  if (bareReplies.has(normalized)) return null;
+
+  const words = normalized.split(/\s+/).filter(Boolean);
+  const wordCount = words.length;
+  const charCount = trimmed.length;
+
+  // Thresholds vary by frequency level.
+  const thresholds = {
+    essential: { minChars: 120, minWords: 14, hasNewlineBonus: true },
+    normal: { minChars: 70, minWords: 9, hasNewlineBonus: true },
+    verbose: { minChars: 40, minWords: 6, hasNewlineBonus: false },
+  };
+  const t = thresholds[level];
+
+  // Basic length/word check.
+  if (charCount < t.minChars && wordCount < t.minWords) return null;
+
+  // Newlines increase the chance of ambiguity (multi-sentence or structured input).
+  const hasNewline = trimmed.includes("\n");
+  if (hasNewline && t.hasNewlineBonus) {
+    // Already passed thresholds; proceed to ambiguity detection.
+  } else if (!hasNewline && charCount < t.minChars) {
+    return null;
+  }
+
+  // Heuristic ambiguity patterns:
+  // 1. Pronouns without clear referent ("it", "this", "that", "them")
+  // 2. Vague directives ("fix it", "improve this", "make it better")
+  // 3. Short ambiguous requests with unclear scope
+
+  const ambiguousPatterns = [
+    // Pronoun-heavy patterns
+    { pattern: /\b(it|this|that|them|those)\b/, interpretationA: "The most recently mentioned item/topic", interpretationB: "The overall task or goal" },
+    // Vague improvement requests
+    { pattern: /\b(fix|improve|change|adjust|modify|refactor)\b.*\b(it|this|that|them)\b/, interpretationA: "Fix the code/logic errors", interpretationB: "Improve the overall quality/style" },
+    // Scope-ambiguous requests
+    { pattern: /\b(make|do|handle|deal with|address)\b.*\b(it|this|that|them|the\b)/, interpretationA: "Focus on the primary/most obvious aspect", interpretationB: "Cover all aspects comprehensively" },
+    // Unclear referent with "the"
+    { pattern: /\b(the\s+\w+\s+\w+)\b.*\b(needs|requires|should|must)\b/, interpretationA: "The specific item mentioned", interpretationB: "The broader system or context" },
+    // General ambiguity with "something"
+    { pattern: /\b(something|anything|somewhere|someone)\b/, interpretationA: "The most relevant/obvious option", interpretationB: "Explore all possible options" },
+  ];
+
+  for (const ap of ambiguousPatterns) {
+    if (ap.pattern.test(normalized)) {
+      return { interpretationA: ap.interpretationA, interpretationB: ap.interpretationB };
+    }
+  }
+
+  // If we got here and the input is long enough, it's ambiguous by default.
+  if (charCount >= t.minChars * 1.5 && wordCount >= t.minWords * 1.5) {
+    return {
+      interpretationA: "Focus on the primary task or request",
+      interpretationB: "Address all aspects and edge cases",
+    };
+  }
+
+  return null;
+}
+
 /** Fast local gate: avoid paying a model call for acknowledgements and tiny commands. */
 export function isPromptCritiqueCandidate(
   text: string,
@@ -70,7 +198,8 @@ export function isPromptCritiqueCandidate(
   if (
     trimmed.includes("[Critique accepted by the user]") ||
     trimmed.includes("[Critique solution accepted by the user]") ||
-    trimmed.includes("[User reply to Critique]")
+    trimmed.includes("[User reply to Critique]") ||
+    trimmed.includes("[Questions answer]")
   ) {
     return false;
   }
@@ -270,4 +399,29 @@ export function buildPromptCritiqueReplyMessage(
     "User reply/clarification:",
     reply.trim(),
   ].join("\n");
+}
+
+export function buildQuestionsMessage(
+  originalPrompt: string,
+  interpretationA: string,
+  interpretationB: string,
+  choice: string,
+  customAnswer: string,
+): string {
+  const base = [
+    originalPrompt,
+    "",
+    "[Questions answer]",
+    `What the user meant:`,
+  ];
+
+  if (choice === "a") {
+    base.push(`Interpretation A: ${interpretationA}`);
+  } else if (choice === "b") {
+    base.push(`Interpretation B: ${interpretationB}`);
+  } else if (choice === "c") {
+    base.push(`User's own interpretation: ${customAnswer.trim()}`);
+  }
+
+  return base.join("\n");
 }

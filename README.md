@@ -8,6 +8,8 @@
 
 **Critique questions the last work step with a separate model and can challenge user instructions before the model starts.** It is not limited to code: it can review implementation work, writing, plans, research, data analysis, ops, or any other project work. Optionally, Critique also runs a fast pre-flight check on sufficiently rich user prompts and shows a short `Critique` widget when the instruction deserves pushback. The feedback is **non-mandatory**: the user and the working model remain the final judges.
 
+Additionally, the **Questions** feature detects ambiguous user input and offers clarifying suggestions before the model acts on it.
+
 ---
 
 ## Features
@@ -27,6 +29,8 @@
 - **Prompt-critique model source** — use either the active working model or the configured critique model
 - **Interactive Critique widget** — ultra-short one-sentence advice in the user's interaction language with `Accept`, `Discard`, or `Reply`; auto-discards after 30 seconds
 - **Persistent config** — `~/.pi/agent/critique.json` stores model choice, auto-inject, and automatic prompt-critique settings across all projects
+- **Questions feature** — optional clarifying widget that detects ambiguous user input and offers three options: two suggested interpretations and a free-text answer; auto-discards after 30 seconds
+- **Questions frequency** — three sensitivity levels: `Essential only` (minimal), `Normal` (moderate), or `Many questions` (high sensitivity)
 
 ## Install
 
@@ -87,7 +91,7 @@ To focus the review:
 | `/critique view` | Show the review only, without injecting it |
 | `/critique view <focus>` | View-only, with a focus note |
 | `/critique view N` | View-only, last `N` steps |
-| `/critique config` | Open the editable settings menu for model, auto-inject, and automatic prompt critique |
+| `/critique config` | Open the editable settings menu for model, auto-inject, prompt critique, and questions |
 
 **Argument parsing:**
 
@@ -166,6 +170,29 @@ If critique is useful, pi shows an ultra-short `Critique` widget in the user's i
 
 Automatic prompt critique can use either the active working model or the configured critique model. It does not require a separate model.
 
+### 5. Optional Questions feature
+
+When enabled in `/critique config`, Critique analyzes user input for ambiguity — unclear pronouns, vague directives, or scope-unclear requests — and shows a `Questions` widget before the model receives the prompt.
+
+The widget presents three options in the user's interaction language:
+
+- **A** — a suggested interpretation (e.g., "Focus on the primary task")
+- **B** — an alternative interpretation (e.g., "Address all aspects comprehensively")
+- **C** — the user types their own answer in a free-text editor
+- **Dismiss** — send the original prompt unchanged (auto-dismisses after 30 seconds)
+
+The selected answer is prepended to the user's prompt as a clarification, so the working model receives a more precise instruction.
+
+#### Questions Frequency
+
+The sensitivity of the Questions feature is controlled by the **Questions frequency** setting:
+
+| Level | Description |
+|-------|-------------|
+| **Essential only** | Only ask when the input is clearly ambiguous (long, multi-sentence, or contains unclear pronouns/references) |
+| **Normal** | Moderate sensitivity; ask for most inputs that could benefit from clarification |
+| **Many questions** | High sensitivity; ask frequently, even for shorter or mildly ambiguous inputs |
+
 ## Model Selection
 
 `/critique config` opens an editable settings menu. Select a setting to change only that value, toggle booleans directly, or choose `Done`/`Esc` to close. Changes are persisted as soon as each setting is edited.
@@ -188,7 +215,9 @@ The config is persisted as JSON at `~/.pi/agent/critique.json`:
   "autoInject": true,
   "autoPromptCritique": false,
   "autoPromptCritiqueLevel": "inconsistencies",
-  "autoPromptCritiqueModel": "working"
+  "autoPromptCritiqueModel": "working",
+  "questions": false,
+  "questionsFrequency": "normal"
 }
 ```
 
@@ -197,6 +226,8 @@ The config is persisted as JSON at `~/.pi/agent/critique.json`:
 - **`autoPromptCritique`** — when `true`, sufficiently rich user instructions are challenged before the model starts.
 - **`autoPromptCritiqueLevel`** — `inconsistencies` only flags real misunderstanding risks; `critical` is moderate; `corrosive` is highly sensitive and skips only clearly logical/complete prompts.
 - **`autoPromptCritiqueModel`** — `working` uses the active model; `critique` uses the configured critique model.
+- **`questions`** — when `true`, ambiguous user input triggers a clarifying Questions widget before the model receives the prompt.
+- **`questionsFrequency`** — sensitivity of the Questions feature: `essential` (minimal), `normal` (moderate), or `verbose` (high; "many questions").
 
 The settings menu offers any model with configured auth that's available in pi's registry; the config persists per-machine (in `getAgentDir()`), shared across all projects.
 
@@ -213,7 +244,7 @@ critique/
 └── src/
     ├── index.ts             # /critique command surface, config UI, review UI, input hook
     ├── config.ts            # persistence + model resolution: pinned, auto, fallback
-    ├── prompt-critique.ts   # automatic user-prompt critique prompt, gate, model call
+    ├── prompt-critique.ts   # automatic user-prompt critique prompt, gate, model call, questions detection
     ├── work-step.ts         # episode splitting + token-budgeted serialization
     └── review.ts            # reviewer prompt + model call + injected-message builder
 ```
@@ -225,12 +256,13 @@ Five-file extension with zero external dependencies (only pi's bundled `@earendi
 - **Reviewer call** — tool-free `ctx.modelRegistry.complete()` with a domain-general structured prompt
 - **Advisory formatter** — wraps the review in a "non-mandatory" envelope before injecting as a follow-up user message
 - **Prompt critique** — optional input hook with local trivial-prompt gate, three challenge levels, and ultra-short JSON model output
-- **UI** — lazy-loaded pickers/viewers/loaders + 30-second Critique widget
+- **Questions detection** — heuristic ambiguity detector with three frequency levels; shows a clarifying widget with A/B/C options
+- **UI** — lazy-loaded pickers/viewers/loaders + 30-second Critique widget + 30-second Questions widget
 
 ## Notes
 
 - The critique model runs with **no tools** and never touches the filesystem. It judges purely from the serialized work step, whatever the domain.
-- In TUI mode the review runs behind a cancelable loader (Esc aborts) and `/critique view` opens a scrollable Markdown viewer. Automatic prompt critique appears as a compact `Critique` widget with a 30-second auto-discard timeout. In RPC mode reviews are surfaced through notifications/dialogs; print mode logs manual reviews to stdout and skips automatic prompt critique.
+- In TUI mode the review runs behind a cancelable loader (Esc aborts) and `/critique view` opens a scrollable Markdown viewer. Automatic prompt critique appears as a compact `Critique` widget with a 30-second auto-discard timeout. The Questions feature appears as a `Questions` widget with the same timeout. In RPC mode reviews are surfaced through notifications/dialogs; print mode logs manual reviews to stdout and skips automatic prompt critique and questions.
 - Provider errors (bad keys, insufficient balance, rate limit) are surfaced as errors instead of silently producing empty reviews.
 - Reviews are capped at 16,000 chars to keep the injected follow-up reasonable; longer reviews are truncated with `… [review truncated]`.
 

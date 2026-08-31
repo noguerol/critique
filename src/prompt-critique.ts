@@ -63,7 +63,7 @@ const LEVEL_GUIDANCE: Record<AutoPromptCritiqueLevel, string> = {
 const QUESTIONS_FREQUENCY_LABELS: Record<QuestionsFrequency, string> = {
   essential: "Essential only",
   normal: "Normal",
-  verbose: "Verbose",
+  verbose: "Many questions",
 };
 
 export function autoPromptCritiqueLevelLabel(level: AutoPromptCritiqueLevel): string {
@@ -97,6 +97,7 @@ export function detectAmbiguity(
 ): { interpretationA: string; interpretationB: string } | null {
   const trimmed = text.trim();
   if (!trimmed) return null;
+  if (trimmed.includes("[Questions answer]")) return null;
 
   const normalized = trimmed
     .toLowerCase()

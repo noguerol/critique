@@ -112,10 +112,14 @@ function autoPromptCritiqueModelSourceLabel(source: AutoPromptCritiqueModelSourc
 function updateCritiqueStatus(ctx: ExtensionContext): void {
   if (!ctx.hasUI) return;
   const config = loadConfig();
-  ctx.ui.setStatus(
-    "critique",
-    config.autoPromptCritique ? "🧠 critique:on" : undefined,
-  );
+  const parts: string[] = [];
+  if (config.autoPromptCritique) {
+    parts.push(`critique:${autoPromptCritiqueLevelLabel(config.autoPromptCritiqueLevel)}`);
+  }
+  if (config.questions) {
+    parts.push(`questions:${questionsFrequencyLabel(config.questionsFrequency)}`);
+  }
+  ctx.ui.setStatus("critique", parts.length > 0 ? parts.join(" ") : undefined);
 }
 
 /**

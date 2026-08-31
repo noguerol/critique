@@ -119,7 +119,7 @@ function updateCritiqueStatus(ctx: ExtensionContext): void {
   if (config.questions) {
     parts.push("❓ questions:on");
   }
-  ctx.ui.setStatus("critique", parts.length > 0 ? parts.join(" ") : undefined);
+  ctx.ui.setStatus("critique", parts.length > 0 ? parts.join(" ") : "🧠 (off)");
 }
 
 /**

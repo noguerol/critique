@@ -16,6 +16,8 @@ import type {
   AutoPromptCritiqueModelSource,
 } from "./prompt-critique.ts";
 
+export type QuestionsFrequency = "essential" | "normal" | "verbose";
+
 export interface CritiqueConfig {
   /** Canonical "provider/modelId" of the critique model. Empty string = auto. */
   model: string;
@@ -27,6 +29,10 @@ export interface CritiqueConfig {
   autoPromptCritiqueLevel: AutoPromptCritiqueLevel;
   /** Which model is used for automatic prompt critique. */
   autoPromptCritiqueModel: AutoPromptCritiqueModelSource;
+  /** Ask clarifying questions when user input is ambiguous. */
+  questions: boolean;
+  /** Sensitivity level for the questions feature. */
+  questionsFrequency: QuestionsFrequency;
 }
 
 export const DEFAULT_CONFIG: CritiqueConfig = {
@@ -35,6 +41,8 @@ export const DEFAULT_CONFIG: CritiqueConfig = {
   autoPromptCritique: false,
   autoPromptCritiqueLevel: "inconsistencies",
   autoPromptCritiqueModel: "working",
+  questions: false,
+  questionsFrequency: "normal",
 };
 
 export function configFilePath(): string {
@@ -46,6 +54,7 @@ export function loadConfig(): CritiqueConfig {
     const raw = JSON.parse(readFileSync(configFilePath(), "utf8")) as Partial<CritiqueConfig>;
     const level = raw.autoPromptCritiqueLevel;
     const modelSource = raw.autoPromptCritiqueModel;
+    const frequency = raw.questionsFrequency;
     return {
       model: typeof raw.model === "string" ? raw.model : DEFAULT_CONFIG.model,
       autoInject:
@@ -62,6 +71,12 @@ export function loadConfig(): CritiqueConfig {
         modelSource === "working" || modelSource === "critique"
           ? modelSource
           : DEFAULT_CONFIG.autoPromptCritiqueModel,
+      questions:
+        typeof raw.questions === "boolean" ? raw.questions : DEFAULT_CONFIG.questions,
+      questionsFrequency:
+        frequency === "essential" || frequency === "normal" || frequency === "verbose"
+          ? frequency
+          : DEFAULT_CONFIG.questionsFrequency,
     };
   } catch {
     return { ...DEFAULT_CONFIG };

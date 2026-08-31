@@ -22,6 +22,19 @@ import {
   saveConfig,
 } from "./config.ts";
 
+import {
+  detectAmbiguity,
+  isPromptCritiqueCandidate,
+  runAutoPromptCritique,
+  buildAcceptedPromptCritiqueMessage,
+  buildPromptCritiqueReplyMessage,
+  buildQuestionsMessage,
+  questionsFrequencyLabel,
+  type QuestionsFrequency,
+  type AutoPromptCritiqueLevel,
+  type AutoPromptCritiqueModelSource,
+} from "./prompt-critique.ts";
+
 type Mode = "config" | "review" | "view";
 
 interface ParsedArgs {
@@ -82,9 +95,11 @@ async function runWithLoader(
 type AutoPromptCritiqueLevel = ReturnType<typeof loadConfig>["autoPromptCritiqueLevel"];
 type AutoPromptCritiqueModelSource = ReturnType<typeof loadConfig>["autoPromptCritiqueModel"];
 type PromptCritiqueAction = "accept" | "discard" | "reply";
+type QuestionAction = "a" | "b" | "c" | "dismiss";
 
 const MAX_VISIBLE_MODELS = 10;
 const PROMPT_CRITIQUE_TIMEOUT_MS = 30_000;
+const QUESTIONS_TIMEOUT_MS = 30_000;
 
 function autoPromptCritiqueLevelLabel(level: AutoPromptCritiqueLevel): string {
   return level === "inconsistencies" ? "Inconsistencies" : level === "critical" ? "Critical" : "Corrosive";
@@ -99,7 +114,7 @@ function updateCritiqueStatus(ctx: ExtensionContext): void {
   const config = loadConfig();
   ctx.ui.setStatus(
     "critique",
-    config.autoPromptCritique ? `critique:${autoPromptCritiqueLevelLabel(config.autoPromptCritiqueLevel)}` : undefined,
+    config.autoPromptCritique ? "🧠 critique:on" : undefined,
   );
 }
 
@@ -294,6 +309,89 @@ async function showPromptCritiqueWidget(
   }, { overlay: true, overlayOptions: { anchor: "bottom-center", width: "90%", minWidth: 20 } });
 }
 
+async function showQuestionsWidget(
+  ctx: ExtensionContext,
+  interpretationA: string,
+  interpretationB: string,
+): Promise<QuestionAction> {
+  if (ctx.mode !== "tui") {
+    const choice = await ctx.ui.select(
+      "What did you mean?",
+      [
+        `A: ${interpretationA}`,
+        `B: ${interpretationB}`,
+        "C: My own answer",
+        "Dismiss (send as-is)",
+      ],
+      { timeout: QUESTIONS_TIMEOUT_MS },
+    );
+    if (choice === "A") return "a";
+    if (choice === "B") return "b";
+    if (choice === "C") return "c";
+    return "dismiss";
+  }
+
+  const { matchesKey } = await import("@earendil-works/pi-tui");
+
+  return ctx.ui.custom<QuestionAction>((tui, theme, _kb, done) => {
+    const started = Date.now();
+    let remaining = QUESTIONS_TIMEOUT_MS;
+    let closed = false;
+
+    const finish = (action: QuestionAction) => {
+      if (closed) return;
+      closed = true;
+      clearInterval(interval);
+      clearTimeout(timeout);
+      done(action);
+    };
+
+    const timeout = setTimeout(() => finish("dismiss"), QUESTIONS_TIMEOUT_MS);
+    const interval = setInterval(() => {
+      remaining = QUESTIONS_TIMEOUT_MS - (Date.now() - started);
+      tui.requestRender();
+    }, 250);
+
+    return {
+      render: (width: number) => {
+        const actualWidth = Math.max(20, Math.min(width, 100));
+        const color = (s: string) => theme.fg("accent", s);
+        const lines: string[] = [];
+        lines.push(frameBorder(actualWidth, "╭", "╮", ` Questions (${formatRemaining(remaining)}) `, color));
+        lines.push(frameLine("", actualWidth, color));
+        lines.push(frameLine("What did you mean?", actualWidth, color));
+        lines.push(frameLine("", actualWidth, color));
+        lines.push(frameLine(`A) ${interpretationA}`, actualWidth, color));
+        lines.push(frameLine(`B) ${interpretationB}`, actualWidth, color));
+        lines.push(frameLine(`C) My own answer`, actualWidth, color));
+        lines.push(frameLine("", actualWidth, color));
+        lines.push(
+          frameLine(
+            "A/B/C choice · Esc dismiss",
+            actualWidth,
+            color,
+          ),
+        );
+        lines.push(frameBorder(actualWidth, "╰", "╯", "", color));
+        return lines;
+      },
+      invalidate: () => {},
+      handleInput: (data: string) => {
+        if (data === "a" || data === "A") finish("a");
+        else if (data === "b" || data === "B") finish("b");
+        else if (data === "c" || data === "C") finish("c"); else if (data === "d" || data === "D" || matchesKey(data, "escape")) {
+          finish("dismiss");
+        }
+        tui.requestRender();
+      },
+      dispose: () => {
+        clearInterval(interval);
+        clearTimeout(timeout);
+      },
+    };
+  }, { overlay: true, overlayOptions: { anchor: "bottom-center", width: "90%", minWidth: 20 } });
+}
+
 async function handleAutomaticPromptCritique(
   ctx: ExtensionContext,
   text: string,
@@ -302,13 +400,6 @@ async function handleAutomaticPromptCritique(
   const config = loadConfig();
   if (!config.autoPromptCritique) return null;
   if (!ctx.hasUI) return null;
-
-  const {
-    buildAcceptedPromptCritiqueMessage,
-    buildPromptCritiqueReplyMessage,
-    isPromptCritiqueCandidate,
-    runAutoPromptCritique,
-  } = await import("./prompt-critique.ts");
 
   if (!isPromptCritiqueCandidate(text, (images?.length ?? 0) > 0, config.autoPromptCritiqueLevel)) return null;
 
@@ -346,6 +437,30 @@ async function handleAutomaticPromptCritique(
     return buildPromptCritiqueReplyMessage(text, advice.critique, advice.solution, reply);
   }
   return null;
+}
+
+async function handleQuestions(
+  ctx: ExtensionContext,
+  text: string,
+): Promise<string | null> {
+  const config = loadConfig();
+  if (!config.questions) return null;
+  if (!ctx.hasUI) return null;
+
+  const ambiguity = detectAmbiguity(text, false, config.questionsFrequency);
+  if (!ambiguity) return null;
+
+  const action = await showQuestionsWidget(ctx, ambiguity.interpretationA, ambiguity.interpretationB);
+  if (action === "dismiss") return null;
+
+  let customAnswer = "";
+  if (action === "c") {
+    const reply = await ctx.ui.editor("Your interpretation", "");
+    if (!reply?.trim()) return null;
+    customAnswer = reply.trim();
+  }
+
+  return buildQuestionsMessage(text, ambiguity.interpretationA, ambiguity.interpretationB, action, customAnswer);
 }
 
 async function runReview(pi: ExtensionAPI, ctx: ExtensionCommandContext, parsed: ParsedArgs): Promise<void> {
@@ -432,7 +547,10 @@ function configSummary(config: ReturnType<typeof loadConfig>): string {
   const promptCritique = config.autoPromptCritique
     ? `${autoPromptCritiqueLevelLabel(config.autoPromptCritiqueLevel)} via ${autoPromptCritiqueModelSourceLabel(config.autoPromptCritiqueModel)}`
     : "off";
-  return `model:${config.model || "auto"} | inject:${config.autoInject ? "on" : "off"} | prompt:${promptCritique}`;
+  const questions = config.questions
+    ? `on (${questionsFrequencyLabel(config.questionsFrequency)})`
+    : "off";
+  return `model:${config.model || "auto"} | inject:${config.autoInject ? "on" : "off"} | prompt:${promptCritique} | questions:${questions}`;
 }
 
 function configMenuItems(config: ReturnType<typeof loadConfig>): SelectItem[] {
@@ -461,6 +579,16 @@ function configMenuItems(config: ReturnType<typeof loadConfig>): SelectItem[] {
       value: "autoPromptCritiqueModel",
       label: "Prompt model",
       description: autoPromptCritiqueModelSourceLabel(config.autoPromptCritiqueModel),
+    },
+    {
+      value: "questions",
+      label: "Questions",
+      description: config.questions ? "on" : "off",
+    },
+    {
+      value: "questionsFrequency",
+      label: "Questions frequency",
+      description: questionsFrequencyLabel(config.questionsFrequency),
     },
     {
       value: "done",
@@ -592,6 +720,13 @@ async function handleConfig(ctx: ExtensionCommandContext): Promise<void> {
       case "autoPromptCritiqueModel":
         changed = await editPromptCritiqueModel(ctx, config);
         break;
+      case "questions":
+        config.questions = !config.questions;
+        changed = true;
+        break;
+      case "questionsFrequency":
+        changed = await editQuestionsFrequency(ctx, config);
+        break;
     }
 
     if (changed) {
@@ -606,6 +741,38 @@ async function handleConfig(ctx: ExtensionCommandContext): Promise<void> {
   ctx.ui.notify(`Critique config closed — ${configSummary(config)}`, "info");
 }
 
+async function editQuestionsFrequency(
+  ctx: ExtensionCommandContext,
+  config: ReturnType<typeof loadConfig>,
+): Promise<boolean> {
+  const freqItems: SelectItem[] = [
+    {
+      value: "essential",
+      label: "Essential only",
+      description: "only ask when truly necessary",
+    },
+    {
+      value: "normal",
+      label: "Normal",
+      description: "moderate sensitivity",
+    },
+    {
+      value: "verbose",
+      label: "Many questions",
+      description: "high sensitivity; ask often",
+    },
+  ];
+  const choice = await chooseConfigItem(
+    ctx,
+    "Questions frequency",
+    freqItems,
+    config.questionsFrequency,
+  );
+  if (choice === undefined) return false;
+  config.questionsFrequency = choice as QuestionsFrequency;
+  return true;
+}
+
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     updateCritiqueStatus(ctx);
@@ -613,6 +780,14 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("input", async (event, ctx) => {
     if (event.source === "extension") return { action: "continue" as const };
+
+    // First, check if the questions feature wants to ask a clarifying question.
+    const questionsTransformed = await handleQuestions(ctx, event.text);
+    if (questionsTransformed) {
+      return { action: "transform" as const, text: questionsTransformed, images: event.images };
+    }
+
+    // Then, check if automatic prompt critique wants to challenge the prompt.
     const transformed = await handleAutomaticPromptCritique(ctx, event.text, event.images);
     if (!transformed) return { action: "continue" as const };
     return { action: "transform" as const, text: transformed, images: event.images };

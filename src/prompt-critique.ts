@@ -86,9 +86,41 @@ export function questionsFrequencyLabel(freq: QuestionsFrequency): string {
 }
 
 /**
- * Detect whether the user's input is ambiguous enough to warrant a
- * clarifying question. Returns a suggested interpretation pair when one is
- * found, or null when the input is clear.
+ * Fast local gate for the Questions feature: skip inputs that are too small or
+ * too formulaic to warrant a question. Mirrors the prompt-critique gate so
+ * questions never fire on trivial or clearly-formed instructions, even at the
+ * most sensitive frequency.
+ */
+export function isAmbiguityCandidate(
+  text: string,
+  level: QuestionsFrequency,
+): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if (trimmed.includes("[Questions answer]")) return false;
+
+  const words = trimmed.split(/\s+/).filter(Boolean);
+  const wordCount = words.length;
+  const charCount = trimmed.length;
+
+  // Three frequency levels, progressively more willing to ask on short input.
+  const thresholds = {
+    essential: { minChars: 160, minWords: 22 },
+    normal: { minChars: 110, minWords: 15 },
+    verbose: { minChars: 60, minWords: 10 },
+  };
+  const t = thresholds[level];
+  if (charCount < t.minChars || wordCount < t.minWords) return false;
+
+  return true;
+}
+
+/**
+ * Detect whether the user's input is genuinely ambiguous — i.e. it contains a
+ * concrete signal that the model would plausibly guess wrong, so a question can
+ * change the outcome. Returns a suggested interpretation pair when one is found,
+ * or null when the input is clear. Only ambiguous *signals* count; length alone
+ * never does.
  */
 export function detectAmbiguity(
   text: string,
@@ -98,12 +130,6 @@ export function detectAmbiguity(
   const trimmed = text.trim();
   if (!trimmed) return null;
   if (trimmed.includes("[Questions answer]")) return null;
-
-  const normalized = trimmed
-    .toLowerCase()
-    .replace(/[.!?¡¿,;:()\[\]{}"'`´]/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
 
   // Skip trivial/acknowledgement inputs.
   const bareReplies = new Set([
@@ -127,61 +153,31 @@ export function detectAmbiguity(
     "para",
     "no hagas eso",
   ]);
-  if (bareReplies.has(normalized)) return null;
+  if (bareReplies.has(trimmed.toLowerCase())) return null;
 
-  const words = normalized.split(/\s+/).filter(Boolean);
-  const wordCount = words.length;
-  const charCount = trimmed.length;
+  const words = trimmed.split(/\s+/).filter(Boolean);
 
-  // Thresholds vary by frequency level.
-  const thresholds = {
-    essential: { minChars: 120, minWords: 14, hasNewlineBonus: true },
-    normal: { minChars: 70, minWords: 9, hasNewlineBonus: true },
-    verbose: { minChars: 40, minWords: 6, hasNewlineBonus: false },
-  };
-  const t = thresholds[level];
-
-  // Basic length/word check.
-  if (charCount < t.minChars && wordCount < t.minWords) return null;
-
-  // Newlines increase the chance of ambiguity (multi-sentence or structured input).
-  const hasNewline = trimmed.includes("\n");
-  if (hasNewline && t.hasNewlineBonus) {
-    // Already passed thresholds; proceed to ambiguity detection.
-  } else if (!hasNewline && charCount < t.minChars) {
-    return null;
-  }
-
-  // Heuristic ambiguity patterns:
-  // 1. Pronouns without clear referent ("it", "this", "that", "them")
-  // 2. Vague directives ("fix it", "improve this", "make it better")
-  // 3. Short ambiguous requests with unclear scope
-
-  const ambiguousPatterns = [
-    // Pronoun-heavy patterns
-    { pattern: /\b(it|this|that|them|those)\b/, interpretationA: "The most recently mentioned item/topic", interpretationB: "The overall task or goal" },
-    // Vague improvement requests
-    { pattern: /\b(fix|improve|change|adjust|modify|refactor)\b.*\b(it|this|that|them)\b/, interpretationA: "Fix the code/logic errors", interpretationB: "Improve the overall quality/style" },
-    // Scope-ambiguous requests
-    { pattern: /\b(make|do|handle|deal with|address)\b.*\b(it|this|that|them|the\b)/, interpretationA: "Focus on the primary/most obvious aspect", interpretationB: "Cover all aspects comprehensively" },
-    // Unclear referent with "the"
-    { pattern: /\b(the\s+\w+\s+\w+)\b.*\b(needs|requires|should|must)\b/, interpretationA: "The specific item mentioned", interpretationB: "The broader system or context" },
-    // General ambiguity with "something"
-    { pattern: /\b(something|anything|somewhere|someone)\b/, interpretationA: "The most relevant/obvious option", interpretationB: "Explore all possible options" },
+  // Heuristic ambiguity signals. A question is only worth asking when one of
+  // these appears, because then the model has to guess the referent/scope and
+  // could reasonably guess wrong.
+  const signals: { pattern: RegExp; interpretationA: string; interpretationB: string }[] = [
+    // Vague imperative with a pronoun object and no explicit target in the same
+    // message ("fix it", "improve this", "refactor that", "make it better").
+    { pattern: /\b(fix|improve|change|adjust|modify|refactor|clean|rework|optimize|redesign|update|rewrite|solve)\b[^.]*\b(it|this|that|them|those|one)\b/, interpretationA: "Apply the standard/obvious fix to the most recent item", interpretationB: "Improve overall quality, not just the flagged item" },
+    // Scope-ambiguous request ("handle this", "do that", "address it").
+    { pattern: /\b(handle|deal with|address|take care of|manage)\b[^.]*\b(it|this|that|them|those)\b/, interpretationA: "Focus on the primary/most obvious aspect", interpretationB: "Cover all aspects comprehensively" },
+    // Cross-message pronoun ("it", "this", "that", "them") with no local referent
+    // in the same message — the referent must come from prior context.
+    { pattern: /\b(it|this|that|them|those|these|anything|something)\b/, interpretationA: "The most recently mentioned item/task", interpretationB: "The overall goal or full scope" },
+    // Missing concrete criteria ("something", "some", "a few", "several") where the
+    // model must guess quantity/type.
+    { pattern: /\b(some|several|a few|many|lots of|various|multiple)\b[^.]*\b(items|things|parts|files|features|tests|steps|points)\b/, interpretationA: "Use a small, obvious default set", interpretationB: "Cover the full range" },
   ];
 
-  for (const ap of ambiguousPatterns) {
-    if (ap.pattern.test(normalized)) {
-      return { interpretationA: ap.interpretationA, interpretationB: ap.interpretationB };
+  for (const signal of signals) {
+    if (signal.pattern.test(trimmed)) {
+      return { interpretationA: signal.interpretationA, interpretationB: signal.interpretationB };
     }
-  }
-
-  // If we got here and the input is long enough, it's ambiguous by default.
-  if (charCount >= t.minChars * 1.5 && wordCount >= t.minWords * 1.5) {
-    return {
-      interpretationA: "Focus on the primary task or request",
-      interpretationB: "Address all aspects and edge cases",
-    };
   }
 
   return null;

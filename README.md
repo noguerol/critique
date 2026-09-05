@@ -172,7 +172,7 @@ Automatic prompt critique can use either the active working model or the configu
 
 ### 5. Optional Questions feature
 
-When enabled in `/critique config`, Critique analyzes user input for ambiguity — unclear pronouns, vague directives, or scope-unclear requests — and shows a `Questions` widget before the model receives the prompt.
+When enabled in `/critique config`, Critique analyzes user input for genuine ambiguity — unclear pronouns with no local referent, vague directives ("fix it", "refactor that"), or scope-unclear requests — and shows a `Questions` widget before the model receives the prompt. A question is only raised when the input is both substantial enough to matter and contains a real signal the model would plausibly guess wrong; length alone never triggers one, and clearly-formed instructions pass through untouched.
 
 The widget presents three options in the user's interaction language:
 
@@ -189,9 +189,9 @@ The sensitivity of the Questions feature is controlled by the **Questions freque
 
 | Level | Description |
 |-------|-------------|
-| **Essential only** | Only ask when the input is clearly ambiguous (long, multi-sentence, or contains unclear pronouns/references) |
-| **Normal** | Moderate sensitivity; ask for most inputs that could benefit from clarification |
-| **Many questions** | High sensitivity; ask frequently, even for shorter or mildly ambiguous inputs |
+| **Essential only** | Only ask on substantial input that contains a genuine ambiguity signal |
+| **Normal** | Moderate sensitivity; ask on inputs that could benefit from clarification |
+| **Many questions** | High sensitivity; ask on shorter or mildly ambiguous inputs, but never on trivial or clearly-formed instructions |
 
 ## Model Selection
 
@@ -256,7 +256,7 @@ Five-file extension with zero external dependencies (only pi's bundled `@earendi
 - **Reviewer call** — tool-free `ctx.modelRegistry.complete()` with a domain-general structured prompt
 - **Advisory formatter** — wraps the review in a "non-mandatory" envelope before injecting as a follow-up user message
 - **Prompt critique** — optional input hook with local trivial-prompt gate, three challenge levels, and ultra-short JSON model output
-- **Questions detection** — heuristic ambiguity detector with three frequency levels; shows a clarifying widget with A/B/C options
+- **Questions detection** — gated heuristic ambiguity detector (substantial input + real ambiguity signal) with three frequency levels; shows a clarifying widget with A/B/C options
 - **UI** — lazy-loaded pickers/viewers/loaders + 30-second Critique widget + 30-second Questions widget
 
 ## Notes

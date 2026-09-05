@@ -26,6 +26,7 @@ import {
   detectAmbiguity,
   isPromptCritiqueCandidate,
   runAutoPromptCritique,
+  isAmbiguityCandidate,
   buildAcceptedPromptCritiqueMessage,
   buildPromptCritiqueReplyMessage,
   buildQuestionsMessage,
@@ -114,12 +115,12 @@ function updateCritiqueStatus(ctx: ExtensionContext): void {
   const config = loadConfig();
   const parts: string[] = [];
   if (config.autoPromptCritique) {
-    parts.push("🧠 critique:on");
+    parts.push("🧠 c:on");
   }
   if (config.questions) {
-    parts.push("❓ questions:on");
+    parts.push("❓ q:on");
   }
-  ctx.ui.setStatus("critique", parts.length > 0 ? parts.join(" ") : "🧠 (off)");
+  ctx.ui.setStatus("critique", parts.length > 0 ? parts.join(" ") : "🧠 c:off");
 }
 
 /**
@@ -450,6 +451,12 @@ async function handleQuestions(
   const config = loadConfig();
   if (!config.questions) return null;
   if (!ctx.hasUI) return null;
+
+  // Only reach the ambiguity detector for inputs substantial enough that a
+  // question could actually change what the model does. This gate mirrors the
+  // prompt-critique gate so questions never fire on trivial or clearly-formed
+  // instructions, even at the most sensitive frequency.
+  if (!isAmbiguityCandidate(text, config.questionsFrequency)) return null;
 
   const ambiguity = detectAmbiguity(text, false, config.questionsFrequency);
   if (!ambiguity) return null;

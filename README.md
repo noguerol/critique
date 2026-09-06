@@ -29,7 +29,7 @@ Additionally, the **Questions** feature detects ambiguous user input and offers 
 - **Prompt-critique model source** — use either the active working model or the configured critique model
 - **Interactive Critique widget** — ultra-short one-sentence advice in the user's interaction language with `Accept`, `Discard`, or `Reply`; auto-discards after 30 seconds
 - **Persistent config** — `~/.pi/agent/critique.json` stores model choice, auto-inject, and automatic prompt-critique settings across all projects
-- **Questions feature** — optional clarifying widget that detects ambiguous user input and offers three options: two suggested interpretations and a free-text answer; auto-discards after 30 seconds
+- **Questions feature** — optional clarifying widget, judged by a model, that detects genuinely ambiguous user input and offers three options: two concrete interpretations restated from your wording and a free-text answer; auto-discards after 30 seconds
 - **Questions frequency** — three sensitivity levels: `Essential only` (minimal), `Normal` (moderate), or `Many questions` (high sensitivity)
 
 ## Install
@@ -172,12 +172,12 @@ Automatic prompt critique can use either the active working model or the configu
 
 ### 5. Optional Questions feature
 
-When enabled in `/critique config`, Critique analyzes user input for genuine ambiguity — unclear pronouns with no local referent, vague directives ("fix it", "refactor that"), or scope-unclear requests — and shows a `Questions` widget before the model receives the prompt. A question is only raised when the input is both substantial enough to matter and contains a real signal the model would plausibly guess wrong; length alone never triggers one, and clearly-formed instructions pass through untouched.
+When enabled in `/critique config`, Critique runs a cheap local gate (size/formula) on the input and then asks a model whether the instruction is genuinely ambiguous — i.e. the wording itself supports two materially different, concrete readings and a wrong guess would make the agent do visibly different work. Only then does it show a `Questions` widget. A question is never raised on length alone, on clearly-formed instructions, or on inputs whose referents are identifiable from the instruction, the conversation, or the workspace. Generic scope flips ("one part vs the whole request", "the item just mentioned vs the overall goal") are explicitly banned at every frequency, and if the model call fails or times out the prompt is sent unchanged — a clarifying question never blocks your input.
 
-The widget presents three options in the user's interaction language:
+The widget presents three options:
 
-- **A** — a suggested interpretation (e.g., "Focus on the primary task")
-- **B** — an alternative interpretation (e.g., "Address all aspects comprehensively")
+- **A** — the first concrete interpretation, restated from your wording
+- **B** — the alternative concrete interpretation
 - **C** — the user types their own answer in a free-text editor
 - **Dismiss** — send the original prompt unchanged (auto-dismisses after 30 seconds)
 
@@ -189,9 +189,9 @@ The sensitivity of the Questions feature is controlled by the **Questions freque
 
 | Level | Description |
 |-------|-------------|
-| **Essential only** | Only ask on substantial input that contains a genuine ambiguity signal |
-| **Normal** | Moderate sensitivity; ask on inputs that could benefit from clarification |
-| **Many questions** | High sensitivity; ask on shorter or mildly ambiguous inputs, but never on trivial or clearly-formed instructions |
+| **Essential only** | Model-judged; ask only when a wrong guess would materially derail the work and the instruction offers two explicit, contrasting readings. Intentionally near-silent. |
+| **Normal** | Model-judged; ask when the instruction offers two plausible contrasting readings and a wrong guess would change what the agent does. |
+| **Many questions** | Model-judged; ask whenever a quick clarification could plausibly help, even mildly. Never on fully clear instructions. |
 
 ## Model Selection
 
@@ -256,7 +256,7 @@ Five-file extension with zero external dependencies (only pi's bundled `@earendi
 - **Reviewer call** — tool-free `ctx.modelRegistry.complete()` with a domain-general structured prompt
 - **Advisory formatter** — wraps the review in a "non-mandatory" envelope before injecting as a follow-up user message
 - **Prompt critique** — optional input hook with local trivial-prompt gate, three challenge levels, and ultra-short JSON model output
-- **Questions detection** — gated heuristic ambiguity detector (substantial input + real ambiguity signal) with three frequency levels; shows a clarifying widget with A/B/C options
+- **Questions detection** — size gate + tool-free model judgment of genuine ambiguity (generic "part vs whole"-style readings explicitly banned), three frequency levels; shows a clarifying widget with A/B/C options
 - **UI** — lazy-loaded pickers/viewers/loaders + 30-second Critique widget + 30-second Questions widget
 
 ## Notes

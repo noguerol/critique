@@ -23,14 +23,15 @@ import {
 } from "./config.ts";
 
 import {
-  detectAmbiguity,
   isPromptCritiqueCandidate,
   runAutoPromptCritique,
+  runQuestionsSuggestion,
   isAmbiguityCandidate,
   buildAcceptedPromptCritiqueMessage,
   buildPromptCritiqueReplyMessage,
   buildQuestionsMessage,
   questionsFrequencyLabel,
+  type QuestionSuggestion,
   type QuestionsFrequency,
   type AutoPromptCritiqueLevel,
   type AutoPromptCritiqueModelSource,
@@ -452,16 +453,36 @@ async function handleQuestions(
   if (!config.questions) return null;
   if (!ctx.hasUI) return null;
 
-  // Only reach the ambiguity detector for inputs substantial enough that a
-  // question could actually change what the model does. This gate mirrors the
-  // prompt-critique gate so questions never fire on trivial or clearly-formed
-  // instructions, even at the most sensitive frequency.
+  // Cheap local gate first: skip inputs too small or formulaic to ever deserve
+  // a question. Whether a question is genuinely useful is judged by the model
+  // below — length alone never triggers one.
   if (!isAmbiguityCandidate(text, config.questionsFrequency)) return null;
 
-  const ambiguity = detectAmbiguity(text, false, config.questionsFrequency);
-  if (!ambiguity) return null;
+  const model = resolveAutoPromptCritiqueModel(ctx, config);
+  if (!model) return null;
 
-  const action = await showQuestionsWidget(ctx, ambiguity.interpretationA, ambiguity.interpretationB);
+  let suggestion: QuestionSuggestion | null = null;
+  try {
+    suggestion = await runQuestionsSuggestion(
+      ctx,
+      model,
+      text,
+      config.questionsFrequency,
+      ctx.signal,
+    );
+  } catch (error) {
+    // Questions are optional: a failing model must never block user input.
+    ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
+    return null;
+  }
+
+  if (!suggestion) return null;
+
+  const action = await showQuestionsWidget(
+    ctx,
+    suggestion.interpretationA,
+    suggestion.interpretationB,
+  );
   if (action === "dismiss") return null;
 
   let customAnswer = "";
@@ -471,7 +492,13 @@ async function handleQuestions(
     customAnswer = reply.trim();
   }
 
-  return buildQuestionsMessage(text, ambiguity.interpretationA, ambiguity.interpretationB, action, customAnswer);
+  return buildQuestionsMessage(
+    text,
+    suggestion.interpretationA,
+    suggestion.interpretationB,
+    action,
+    customAnswer,
+  );
 }
 
 async function runReview(pi: ExtensionAPI, ctx: ExtensionCommandContext, parsed: ParsedArgs): Promise<void> {

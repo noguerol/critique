@@ -5,8 +5,11 @@
  * It is intentionally lightweight: a cheap heuristic avoids trivial prompts,
  * then a tool-free model call decides whether there is anything worth showing.
  *
- * It also provides the "questions" feature: when user input is ambiguous,
- * a clarifying widget offers three options (two suggestions + free text).
+ * It also provides the "questions" feature: after a cheap local gate, a
+ * tool-free model call decides whether the user input is genuinely ambiguous
+ * in a way that could make the working model guess wrong; when it is, a
+ * clarifying widget offers three options (two concrete interpretations + free
+ * text). Generic "part vs whole"-style questions are explicitly banned.
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -38,18 +41,6 @@ export interface AutoPromptCritiqueAdvice {
   solution: string;
 }
 
-export interface QuestionOption {
-  label: string;
-  description: string;
-  value: string;
-}
-
-export interface QuestionResult {
-  /** "a", "b", or "c" */
-  choice: string;
-  /** Free-text answer when choice is "c". */
-  customAnswer: string;
-}
 
 const LEVEL_GUIDANCE: Record<AutoPromptCritiqueLevel, string> = {
   inconsistencies:
@@ -86,10 +77,11 @@ export function questionsFrequencyLabel(freq: QuestionsFrequency): string {
 }
 
 /**
- * Fast local gate for the Questions feature: skip inputs that are too small or
- * too formulaic to warrant a question. Mirrors the prompt-critique gate so
- * questions never fire on trivial or clearly-formed instructions, even at the
- * most sensitive frequency.
+ * Fast local gate for the Questions feature. Only decides *eligibility*: skip
+ * inputs too small or formulaic to ever warrant a question, so we never spend a
+ * model call on them. Whether a question is genuinely useful is a semantic
+ * judgment left to the model in runQuestionsSuggestion — length alone never
+ * triggers a question, and clearly-formed instructions pass through untouched.
  */
 export function isAmbiguityCandidate(
   text: string,
@@ -97,6 +89,8 @@ export function isAmbiguityCandidate(
 ): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
+  if (trimmed.startsWith("/") || trimmed.startsWith("!")) return false;
+  // Never re-ask about an instruction we already clarified.
   if (trimmed.includes("[Questions answer]")) return false;
 
   const words = trimmed.split(/\s+/).filter(Boolean);
@@ -115,72 +109,173 @@ export function isAmbiguityCandidate(
   return true;
 }
 
+export interface QuestionSuggestion {
+  interpretationA: string;
+  interpretationB: string;
+}
+
+const QUESTIONS_FREQUENCY_GUIDANCE: Record<QuestionsFrequency, string> = {
+  essential:
+    "Essential only: ask only when a wrong guess would materially derail the work AND the instruction itself offers two explicit, contrasting readings. Otherwise shouldAsk:false — this level is intentionally near-silent.",
+  normal:
+    "Ask when the instruction offers two plausible contrasting readings and a wrong guess would change what the agent does. Skip anything resolvable from context.",
+  verbose:
+    "Ask whenever a quick clarification could plausibly help, even mildly. Still never on fully clear instructions.",
+};
+
 /**
- * Detect whether the user's input is genuinely ambiguous — i.e. it contains a
- * concrete signal that the model would plausibly guess wrong, so a question can
- * change the outcome. Returns a suggested interpretation pair when one is found,
- * or null when the input is clear. Only ambiguous *signals* count; length alone
- * never does.
+ * Decision prompt for the Questions feature. A question is only worth showing
+ * when the instruction itself leaves two *materially different, concrete*
+ * readings. Generic scope flips — "part of the request vs the whole request",
+ * "the item just mentioned vs the overall goal" — are explicitly banned at
+ * every frequency, as is manufacturing uncertainty when the referent is named
+ * in the instruction: that is the class of silly questions this feature exists
+ * to never ask.
  */
-export function detectAmbiguity(
-  text: string,
-  hasImages: boolean,
+export const QUESTIONS_SYSTEM_PROMPT = [
+  "Judge whether a user instruction to an AI agent needs a clarifying question.",
+  "The default is shouldAsk:false — a competent agent resolves most ambiguities from the instruction and the conversation.",
+  "Ask ONLY when the instruction itself contains two explicit, contrasting candidate readings (often signalled by 'o', 'or', 'vs', 'solo/solamente', 'también', 'en vez de', 'better', 'alternatively', or a deictic such as 'it/esto/hazlo' whose referent is NOT resolvable from this instruction or the recent conversation), AND acting on one would make the agent do visibly different concrete work than acting on the other.",
+  "Never ask when:",
+  "- the referent is identifiable from the instruction itself, even when a pronoun appears ('this file has an error ... fix it' names the object), from the recent conversation, or from the workspace;",
+  "- the referent can be looked up by the agent in the workspace or conversation: files, code, repo, or the previously discussed request ('fix it', 'this file', 'el código', 'el proyecto', 'lo que hablamos') are resolvable — never ask 'which file/item do you mean';",
+  "- the only distinction you could offer is generic or paraphrases the same action: 'one part vs the whole request', 'the mentioned item/task vs the overall goal', 'fix only X vs improve everything', 'the file CI flags vs the file referenced earlier';",
+  "- the instruction asks the agent itself to decide or recommend;",
+  "- it is an acknowledgement, tiny command, quick correction, or a detailed spec with no fork.",
+  "Sensitivity comes from frequency-guidance. Respect it strictly; essential is intentionally near-silent.",
+  "If asking, give two CONCISE interpretations (a and b) using contrasting words copied from the instruction, in the instruction's language, ≤12 words each.",
+  "JSON only:",
+  '{"shouldAsk":true|false,"a":"text","b":"text"}',
+].join("\n");
+
+export function buildQuestionsSuggestionPrompt(
+  prompt: string,
   level: QuestionsFrequency,
-): { interpretationA: string; interpretationB: string } | null {
+  cwd: string,
+): string {
+  return [
+    `<questions-frequency>${questionsFrequencyLabel(level)}</questions-frequency>`,
+    `<frequency-guidance>${QUESTIONS_FREQUENCY_GUIDANCE[level]}</frequency-guidance>`,
+    `<project-cwd>${cwd}</project-cwd>`,
+    "",
+    "Instruction:",
+    "<user-instruction>",
+    prompt.length > MAX_PROMPT_CHARS ? `${prompt.slice(0, MAX_PROMPT_CHARS)}… [truncated]` : prompt,
+    "</user-instruction>",
+  ].join("\n");
+}
+
+function parseQuestionsJson(text: string): {
+  shouldAsk: boolean;
+  a: string;
+  b: string;
+} | null {
   const trimmed = text.trim();
-  if (!trimmed) return null;
-  if (trimmed.includes("[Questions answer]")) return null;
+  const candidates = [trimmed, trimmed.match(/\{[\s\S]*\}/)?.[0]].filter(
+    (candidate): candidate is string => !!candidate,
+  );
 
-  // Skip trivial/acknowledgement inputs.
-  const bareReplies = new Set([
-    "ok",
-    "okay",
-    "yes",
-    "no",
-    "y",
-    "n",
-    "thanks",
-    "thank you",
-    "gracias",
-    "vale",
-    "sí",
-    "si",
-    "sigue",
-    "continua",
-    "continúa",
-    "continue",
-    "stop",
-    "para",
-    "no hagas eso",
-  ]);
-  if (bareReplies.has(trimmed.toLowerCase())) return null;
-
-  const words = trimmed.split(/\s+/).filter(Boolean);
-
-  // Heuristic ambiguity signals. A question is only worth asking when one of
-  // these appears, because then the model has to guess the referent/scope and
-  // could reasonably guess wrong.
-  const signals: { pattern: RegExp; interpretationA: string; interpretationB: string }[] = [
-    // Vague imperative with a pronoun object and no explicit target in the same
-    // message ("fix it", "improve this", "refactor that", "make it better").
-    { pattern: /\b(fix|improve|change|adjust|modify|refactor|clean|rework|optimize|redesign|update|rewrite|solve)\b[^.]*\b(it|this|that|them|those|one)\b/, interpretationA: "Apply the standard/obvious fix to the most recent item", interpretationB: "Improve overall quality, not just the flagged item" },
-    // Scope-ambiguous request ("handle this", "do that", "address it").
-    { pattern: /\b(handle|deal with|address|take care of|manage)\b[^.]*\b(it|this|that|them|those)\b/, interpretationA: "Focus on the primary/most obvious aspect", interpretationB: "Cover all aspects comprehensively" },
-    // Cross-message pronoun ("it", "this", "that", "them") with no local referent
-    // in the same message — the referent must come from prior context.
-    { pattern: /\b(it|this|that|them|those|these|anything|something)\b/, interpretationA: "The most recently mentioned item/task", interpretationB: "The overall goal or full scope" },
-    // Missing concrete criteria ("something", "some", "a few", "several") where the
-    // model must guess quantity/type.
-    { pattern: /\b(some|several|a few|many|lots of|various|multiple)\b[^.]*\b(items|things|parts|files|features|tests|steps|points)\b/, interpretationA: "Use a small, obvious default set", interpretationB: "Cover the full range" },
-  ];
-
-  for (const signal of signals) {
-    if (signal.pattern.test(trimmed)) {
-      return { interpretationA: signal.interpretationA, interpretationB: signal.interpretationB };
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as {
+        shouldAsk?: unknown;
+        a?: unknown;
+        b?: unknown;
+      };
+      if (parsed.shouldAsk !== true) return { shouldAsk: false, a: "", b: "" };
+      const a = typeof parsed.a === "string" ? parsed.a.trim() : "";
+      const b = typeof parsed.b === "string" ? parsed.b.trim() : "";
+      if (!a || !b) return { shouldAsk: false, a: "", b: "" };
+      const normalize = (s: string) => s.toLowerCase().replace(/\s+/g, " ");
+      if (normalize(a) === normalize(b)) return { shouldAsk: false, a: "", b: "" };
+      return { shouldAsk: true, a, b };
+    } catch {
+      // Try the next candidate.
     }
   }
-
   return null;
+}
+
+const QUESTION_OPTION_STOP_WORDS = new Set(
+  [
+    "the", "a", "an", "to", "of", "in", "for", "on", "with", "and", "or", "at", "by",
+    "from", "que", "de", "la", "el", "en", "del", "lo", "un", "una", "al", "y", "o",
+    "se", "por", "para", "como", "es", "su", "los", "las", "this", "that", "these",
+    "those", "are", "is", "was", "be", "it", "we", "you", "they", "i", "me", "te",
+    "le", "nos", "ha", "he", "han", "ya", "más", "mas", "sin", "sobre", "entre",
+    "cada", "todo", "toda", "todos", "todas", "cual", "cuales", "donde", "cuando", "what",
+    "which", "where", "when", "there", "here", "all", "only", "solo", "sólo", "también",
+  ],
+);
+
+/**
+ * Guard against hallucinated/generic options: each proposed interpretation must
+ * share at least one substantive word with the instruction itself, otherwise it
+ * was not restated from the user's wording and should not be shown.
+ */
+function sharesWordingWithPrompt(option: string, prompt: string): boolean {
+  const optionWords = option
+    .toLowerCase()
+    .split(/\s+/)
+    .filter((word) => word.length >= 4 && !QUESTION_OPTION_STOP_WORDS.has(word));
+  if (optionWords.length === 0) return true; // Cannot judge — do not drop.
+  const promptLower = prompt.toLowerCase();
+  return optionWords.some((word) => promptLower.includes(word));
+}
+
+/**
+ * Ask a model whether the user's input is genuinely ambiguous and, when it is,
+ * obtain two concrete interpretations to offer. Returns null when there is no
+ * worthwhile question, or when the call is aborted or fails — in those cases
+ * the user's input always passes through untouched.
+ */
+export async function runQuestionsSuggestion(
+  ctx: ExtensionContext,
+  model: Model<any>,
+  prompt: string,
+  level: QuestionsFrequency,
+  signal?: AbortSignal,
+): Promise<QuestionSuggestion | null> {
+  const userMessage: Message = {
+    role: "user",
+    content: [
+      {
+        type: "text",
+        text: buildQuestionsSuggestionPrompt(prompt, level, ctx.cwd),
+      },
+    ],
+    timestamp: Date.now(),
+  };
+
+  const response = await ctx.modelRegistry.complete(
+    model,
+    { systemPrompt: QUESTIONS_SYSTEM_PROMPT, messages: [userMessage] },
+    { signal, cacheRetention: "none", sessionId: uuidv7() },
+  );
+
+  if (response.stopReason === "aborted") return null;
+  if (response.stopReason === "error") {
+    throw new Error(
+      `Questions model ${model.provider}/${model.id} failed: ${response.errorMessage ?? "unknown error"}`,
+    );
+  }
+
+  const raw = response.content
+    .filter((block): block is { type: "text"; text: string } => block.type === "text")
+    .map((block) => block.text)
+    .join("\n")
+    .trim();
+
+  const parsed = parseQuestionsJson(raw);
+  if (!parsed?.shouldAsk || !parsed.a || !parsed.b) return null;
+
+  const interpretationA = compactOneSentence(parsed.a, 120);
+  const interpretationB = compactOneSentence(parsed.b, 120);
+  if (!interpretationA || !interpretationB) return null;
+  if (!sharesWordingWithPrompt(interpretationA, prompt)) return null;
+  if (!sharesWordingWithPrompt(interpretationB, prompt)) return null;
+
+  return { interpretationA, interpretationB };
 }
 
 /** Fast local gate: avoid paying a model call for acknowledgements and tiny commands. */

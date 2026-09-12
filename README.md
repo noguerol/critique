@@ -33,7 +33,7 @@ The **autocritique-code** feature is a post-implementation QA pass: when the age
 - **Persistent config** — `~/.pi/agent/critique.json` stores model choice, auto-inject, and automatic prompt-critique settings across all projects
 - **Questions feature** — optional clarifying widget, judged by a model, that detects genuinely ambiguous user input and offers three options: two concrete interpretations restated from your wording and a free-text answer; auto-discards after 30 seconds
 - **Questions frequency** — three sensitivity levels: `Essential only` (minimal), `Normal` (moderate), or `Many questions` (high sensitivity)
-- **autocritique-code** — optional post-implementation adversarial QA: after the working agent settles, if the last turn performed real work (at least one tool call), it injects a scope-bounded directive to stress edge cases, verify by execution, remediate and report a changelog
+- **autocritique-code** — optional post-implementation adversarial QA: after the working agent settles, if the last turn performed real work (at least one tool call), it injects a scope-bounded directive to stress edge cases, verify by execution, remediate and report a changelog; the pass runs on the active model (optionally via an independent subagent), never on the critique model
 - **Bounded QA passes** — `1`–`3` sequential passes per user turn; a persistent in-session marker plus an in-memory counter make self-retriggering impossible, and a genuine user turn resets the budget
 
 ## Install
@@ -211,7 +211,7 @@ The improved directive replaces the original "loop until 100% clean" idea with s
 - **Fix, don't report** — remediate every real issue and re-run verification, with a hard cap of three verification/remediation cycles inside the pass.
 - **No invented requirements** — anything that needs a product decision is recorded as residual risk instead of guessed at.
 - **Evidence required** — the pass must end with an itemized changelog (*Fixed / Tests / Improved / Residual risk*) and may not claim success without an executed check.
-- **Optional subagents** — it delegates adversarial exploration to a parallel subagent when one is available, but does the pass itself otherwise.
+- **Independent subagent, same model** — the adversarial exploration is delegated to a parallel subagent as an independent process whenever one is available, and that subagent must run on the active/main model. The model configured for `/critique` is never used for this pass: it is reserved for deep critical reviews of any subject.
 
 Loop safety is enforced independently of the model: the directive carries a stable marker, and the extension counts consecutive markers at the end of the session branch. A `1`–`3` pass budget caps the worst case, an in-memory counter catches any marker-detection miss, and a genuine user turn resets the budget. With the default of one pass, a completed user turn gets exactly one QA pass.
 

@@ -625,7 +625,7 @@ function configMenuItems(config: ReturnType<typeof loadConfig>): SelectItem[] {
       value: "autocritiqueCode",
       label: "Autocritique code",
       description: config.autocritiqueCode
-        ? `on (${config.autocritiqueCodeRounds} round${config.autocritiqueCodeRounds === 1 ? "" : "s"})`
+        ? `on (${config.autocritiqueCodeRounds} round${config.autocritiqueCodeRounds === 1 ? "" : "s"}, active model)`
         : "off",
     },
     {

@@ -10,6 +10,8 @@
 
 Additionally, the **Questions** feature detects ambiguous user input and offers clarifying suggestions before the model acts on it.
 
+The **autocritique-code** feature is a post-implementation QA pass: when the agent settles after doing real work, it injects a bounded adversarial directive that forces the agent to stress its own change, verify by execution, fix what it finds, and report an itemized changelog instead of declaring success.
+
 ---
 
 ## Features
@@ -31,6 +33,8 @@ Additionally, the **Questions** feature detects ambiguous user input and offers 
 - **Persistent config** — `~/.pi/agent/critique.json` stores model choice, auto-inject, and automatic prompt-critique settings across all projects
 - **Questions feature** — optional clarifying widget, judged by a model, that detects genuinely ambiguous user input and offers three options: two concrete interpretations restated from your wording and a free-text answer; auto-discards after 30 seconds
 - **Questions frequency** — three sensitivity levels: `Essential only` (minimal), `Normal` (moderate), or `Many questions` (high sensitivity)
+- **autocritique-code** — optional post-implementation adversarial QA: after the working agent settles, if the last turn performed real work (at least one tool call), it injects a scope-bounded directive to stress edge cases, verify by execution, remediate and report a changelog
+- **Bounded QA passes** — `1`–`3` sequential passes per user turn; a persistent in-session marker plus an in-memory counter make self-retriggering impossible, and a genuine user turn resets the budget
 
 ## Install
 
@@ -91,7 +95,10 @@ To focus the review:
 | `/critique view` | Show the review only, without injecting it |
 | `/critique view <focus>` | View-only, with a focus note |
 | `/critique view N` | View-only, last `N` steps |
-| `/critique config` | Open the editable settings menu for model, auto-inject, prompt critique, and questions |
+| `/critique config` | Open the editable settings menu for model, auto-inject, prompt critique, questions, and autocritique-code |
+| `/critique autocritique-code` | Toggle the post-implementation adversarial QA on/off |
+| `/critique autocritique-code on` \| `off` | Enable/disable it explicitly |
+| `/critique autocritique-code 1` \| `2` \| `3` | Enable it and set the number of QA passes per user turn (aliases: `autocritique`, `acode`) |
 
 **Argument parsing:**
 
@@ -193,6 +200,21 @@ The sensitivity of the Questions feature is controlled by the **Questions freque
 | **Normal** | Model-judged; ask when the instruction offers two plausible contrasting readings and a wrong guess would change what the agent does. |
 | **Many questions** | Model-judged; ask whenever a quick clarification could plausibly help, even mildly. Never on fully clear instructions. |
 
+### 6. Optional autocritique-code (post-implementation adversarial QA)
+
+When enabled, Critique listens to `agent_settled` — the point where pi will not auto-retry, compact or continue — and, once the agent has finished a turn that actually did work, injects one adversarial QA directive as a follow-up user message. Pure chat turns (no tool calls in the last work episode) are left untouched.
+
+The improved directive replaces the original "loop until 100% clean" idea with something bounded and safe:
+
+- **Scope-bounded** — it explicitly says this is not a new feature request and not a rewrite; fixes must stay inside the original task.
+- **Execution over inspection** — run the test suites, linters, type checks and the real code paths, and read the output; write the missing tests when coverage is insufficient.
+- **Fix, don't report** — remediate every real issue and re-run verification, with a hard cap of three verification/remediation cycles inside the pass.
+- **No invented requirements** — anything that needs a product decision is recorded as residual risk instead of guessed at.
+- **Evidence required** — the pass must end with an itemized changelog (*Fixed / Tests / Improved / Residual risk*) and may not claim success without an executed check.
+- **Optional subagents** — it delegates adversarial exploration to a parallel subagent when one is available, but does the pass itself otherwise.
+
+Loop safety is enforced independently of the model: the directive carries a stable marker, and the extension counts consecutive markers at the end of the session branch. A `1`–`3` pass budget caps the worst case, an in-memory counter catches any marker-detection miss, and a genuine user turn resets the budget. With the default of one pass, a completed user turn gets exactly one QA pass.
+
 ## Model Selection
 
 `/critique config` opens an editable settings menu. Select a setting to change only that value, toggle booleans directly, or choose `Done`/`Esc` to close. Changes are persisted as soon as each setting is edited.
@@ -217,7 +239,9 @@ The config is persisted as JSON at `~/.pi/agent/critique.json`:
   "autoPromptCritiqueLevel": "inconsistencies",
   "autoPromptCritiqueModel": "working",
   "questions": false,
-  "questionsFrequency": "normal"
+  "questionsFrequency": "normal",
+  "autocritiqueCode": false,
+  "autocritiqueCodeRounds": 1
 }
 ```
 
@@ -228,6 +252,8 @@ The config is persisted as JSON at `~/.pi/agent/critique.json`:
 - **`autoPromptCritiqueModel`** — `working` uses the active model; `critique` uses the configured critique model.
 - **`questions`** — when `true`, ambiguous user input triggers a clarifying Questions widget before the model receives the prompt.
 - **`questionsFrequency`** — sensitivity of the Questions feature: `essential` (minimal), `normal` (moderate), or `verbose` (high; "many questions").
+- **`autocritiqueCode`** — when `true`, injects an adversarial QA pass after the working agent settles on a turn that did real work.
+- **`autocritiqueCodeRounds`** — how many sequential QA passes may follow a single user turn: `1` (default), `2`, or `3`.
 
 The settings menu offers any model with configured auth that's available in pi's registry; the config persists per-machine (in `getAgentDir()`), shared across all projects.
 
@@ -242,14 +268,15 @@ critique/
 │   ├── banner.jpeg      # wide README header
 │   └── preview.jpeg     # npm pi.dev preview card
 └── src/
-    ├── index.ts             # /critique command surface, config UI, review UI, input hook
+    ├── index.ts             # /critique command surface, config UI, review UI, input + agent_settled hooks
     ├── config.ts            # persistence + model resolution: pinned, auto, fallback
+    ├── autocritique-code.ts # post-implementation adversarial QA: directive builder + anti-loop policy
     ├── prompt-critique.ts   # automatic user-prompt critique prompt, gate, model call, questions detection
     ├── work-step.ts         # episode splitting + token-budgeted serialization
     └── review.ts            # reviewer prompt + model call + injected-message builder
 ```
 
-Five-file extension with zero external dependencies (only pi's bundled `@earendil-works/*` + Node built-ins):
+Six-file extension with zero external dependencies (only pi's bundled `@earendil-works/*` + Node built-ins):
 
 - **Episode splitter** — splits a session branch into user-message-bounded episodes, picks the last one with work
 - **Token budgeter** — hard caps per field, marks truncations so the reviewer knows what it didn't see
@@ -257,6 +284,7 @@ Five-file extension with zero external dependencies (only pi's bundled `@earendi
 - **Advisory formatter** — wraps the review in a "non-mandatory" envelope before injecting as a follow-up user message
 - **Prompt critique** — optional input hook with local trivial-prompt gate, three challenge levels, and ultra-short JSON model output
 - **Questions detection** — size gate + tool-free model judgment of genuine ambiguity (generic "part vs whole"-style readings explicitly banned), three frequency levels; shows a clarifying widget with A/B/C options
+- **autocritique-code** — pure directive builder + anti-loop policy driven by the `agent_settled` event; counts its own markers in the session branch, applies a 1–3 pass budget, and skips turns without real tool work
 - **UI** — lazy-loaded pickers/viewers/loaders + 30-second Critique widget + 30-second Questions widget
 
 ## Notes
@@ -265,6 +293,7 @@ Five-file extension with zero external dependencies (only pi's bundled `@earendi
 - In TUI mode the review runs behind a cancelable loader (Esc aborts) and `/critique view` opens a scrollable Markdown viewer. Automatic prompt critique appears as a compact `Critique` widget with a 30-second auto-discard timeout. The Questions feature appears as a `Questions` widget with the same timeout. In RPC mode reviews are surfaced through notifications/dialogs; print mode logs manual reviews to stdout and skips automatic prompt critique and questions.
 - Provider errors (bad keys, insufficient balance, rate limit) are surfaced as errors instead of silently producing empty reviews.
 - Reviews are capped at 16,000 chars to keep the injected follow-up reasonable; longer reviews are truncated with `… [review truncated]`.
+- autocritique-code only runs in dialog-capable modes (TUI/RPC) and only after a turn that performed at least one tool call. Each injected pass is a real user message, so it gets its own work episode and never contaminates the previous one during a later manual `/critique`.
 
 ## License
 

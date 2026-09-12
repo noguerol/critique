@@ -15,6 +15,7 @@ import type {
   AutoPromptCritiqueLevel,
   AutoPromptCritiqueModelSource,
 } from "./prompt-critique.ts";
+import { normalizeAutocritiqueCodeRounds, type AutocritiqueCodeRounds } from "./autocritique-code.ts";
 
 export type QuestionsFrequency = "essential" | "normal" | "verbose";
 
@@ -33,6 +34,10 @@ export interface CritiqueConfig {
   questions: boolean;
   /** Sensitivity level for the questions feature. */
   questionsFrequency: QuestionsFrequency;
+  /** Run an adversarial QA pass on the work once the agent settles. */
+  autocritiqueCode: boolean;
+  /** How many adversarial QA passes may follow a single user turn. */
+  autocritiqueCodeRounds: AutocritiqueCodeRounds;
 }
 
 export const DEFAULT_CONFIG: CritiqueConfig = {
@@ -43,6 +48,8 @@ export const DEFAULT_CONFIG: CritiqueConfig = {
   autoPromptCritiqueModel: "working",
   questions: false,
   questionsFrequency: "normal",
+  autocritiqueCode: false,
+  autocritiqueCodeRounds: 1,
 };
 
 export function configFilePath(): string {
@@ -77,6 +84,11 @@ export function loadConfig(): CritiqueConfig {
         frequency === "essential" || frequency === "normal" || frequency === "verbose"
           ? frequency
           : DEFAULT_CONFIG.questionsFrequency,
+      autocritiqueCode:
+        typeof raw.autocritiqueCode === "boolean"
+          ? raw.autocritiqueCode
+          : DEFAULT_CONFIG.autocritiqueCode,
+      autocritiqueCodeRounds: normalizeAutocritiqueCodeRounds(raw.autocritiqueCodeRounds),
     };
   } catch {
     return { ...DEFAULT_CONFIG };

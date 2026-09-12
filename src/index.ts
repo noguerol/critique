@@ -879,11 +879,11 @@ async function editAutocritiqueCodeRounds(
 async function maybeAutocritiqueCode(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
   const config = loadConfig();
   if (!config.autocritiqueCode) return;
+  if (!ctx.hasUI) return;
 
   const branch = ctx.sessionManager.getBranch();
-  const { listUserPrompts, extractWorkSteps } = await import("./work-step.ts");
-  const steps = extractWorkSteps(branch, 1);
-  const lastStep = steps[steps.length - 1];
+  const { listUserPrompts, extractLatestStep } = await import("./work-step.ts");
+  const latestStep = extractLatestStep(branch);
 
   const plan = planAutocritiqueCode({
     enabled: config.autocritiqueCode,
@@ -891,7 +891,7 @@ async function maybeAutocritiqueCode(pi: ExtensionAPI, ctx: ExtensionContext): P
     idle: ctx.isIdle(),
     maxRounds: config.autocritiqueCodeRounds,
     userPrompts: listUserPrompts(branch),
-    lastStepHasToolCalls: (lastStep?.toolCalls.length ?? 0) > 0,
+    lastStepHasToolCalls: (latestStep?.toolCalls.length ?? 0) > 0,
     injections: autocritiqueCodeInjections,
   });
   autocritiqueCodeInjections = plan.injections;

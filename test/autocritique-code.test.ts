@@ -20,7 +20,7 @@ import {
   type AutocritiqueCodePlanInput,
 } from "../src/autocritique-code.ts";
 
-import { extractWorkSteps, formatWorkSteps, listUserPrompts } from "../src/work-step.ts";
+import { extractLatestStep, extractWorkSteps, formatWorkSteps, listUserPrompts } from "../src/work-step.ts";
 
 // --- marker / detection ---------------------------------------------------
 
@@ -253,6 +253,46 @@ test("listUserPrompts returns every user prompt, oldest first", () => {
     { role: "user", content: "second" },
   ]);
   assert.deepEqual(listUserPrompts(branch), ["first", "second"]);
+});
+
+test("extractLatestStep returns the newest episode even when it has no work", () => {
+  const branch = branchFrom([
+    { role: "user", content: "implement" },
+    {
+      role: "assistant",
+      content: [{ type: "toolCall", id: "1", name: "edit", arguments: { path: "a.ts" } }],
+    },
+    { role: "user", content: "aborted turn" },
+  ]);
+
+  const latest = extractLatestStep(branch);
+  assert.ok(latest);
+  assert.equal(latest.userPrompt, "aborted turn");
+  assert.equal(latest.toolCalls.length, 0);
+
+  // The regression this guards against: extractWorkSteps falls back to the
+  // older worked episode, which would report tool work for an empty turn.
+  assert.equal(extractWorkSteps(branch, 1)[0]?.userPrompt, "implement");
+});
+
+test("extractLatestStep treats a text-only answer as no tool work", () => {
+  const branch = branchFrom([
+    { role: "user", content: "implement" },
+    { role: "assistant", content: [{ type: "toolCall", id: "1", name: "edit", arguments: {} }] },
+    { role: "user", content: "explain it" },
+    { role: "assistant", content: [{ type: "text", text: "It does X." }] },
+  ]);
+  const latest = extractLatestStep(branch);
+  assert.equal(latest?.userPrompt, "explain it");
+  assert.equal(latest?.toolCalls.length, 0);
+});
+
+test("extractLatestStep returns null when there is no user turn", () => {
+  assert.equal(extractLatestStep(branchFrom([])), null);
+  assert.equal(
+    extractLatestStep(branchFrom([{ role: "assistant", content: [{ type: "text", text: "hi" }] }])),
+    null,
+  );
 });
 
 test("extractWorkSteps still isolates episodes after the autocritique insertion", () => {

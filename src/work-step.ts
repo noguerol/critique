@@ -131,6 +131,20 @@ export function extractWorkSteps(branch: SessionEntry[], count: number): WorkSte
   return steps;
 }
 
+/**
+ * Build the newest episode (everything after the last user message) even when
+ * it contains no work. autocritique-code uses this to tell whether the turn
+ * that just settled did anything: extractWorkSteps would fall back to an older
+ * episode that did have work, so a turn aborted with no assistant output would
+ * look like work and wrongly trigger a QA pass.
+ */
+export function extractLatestStep(branch: SessionEntry[]): WorkStep | null {
+  for (let i = branch.length - 1; i >= 0; i--) {
+    if (isUserEntry(branch[i])) return buildStep(branch, i, branch.length);
+  }
+  return null;
+}
+
 function buildStep(branch: SessionEntry[], start: number, end: number): WorkStep {
   const userPrompt = contentText(messageOf(branch[start]).content);
   const toolCalls: WorkStepToolCall[] = [];

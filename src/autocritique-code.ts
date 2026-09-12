@@ -180,7 +180,7 @@ export function buildAutocritiqueCodeDirective(round: number, totalRounds: numbe
     "3. Remediate instead of reporting. For every real issue: fix it, refactor cleanly when warranted, re-run the verification suite, and confirm there is no regression. Keep fixes minimal and inside the original scope.",
     `4. Iterate at most ${AUTOCRITIQUE_CODE_INTERNAL_BUDGET} verification/remediation cycles inside this pass. Stop as soon as the executed checks pass and you cannot construct a failing case for the changed behaviour. Do not chase cosmetic nitpicks and do not expand scope; if something genuinely needs a product decision, record it as residual risk instead of inventing new requirements.`,
     "",
-    "If a parallel subagent tool is available, delegate adversarial exploration of the change to it; otherwise perform the pass yourself. Either way, you are responsible for the fixes.",
+    "Delegate the adversarial exploration to a subagent whenever a parallel-subagent or task-delegation tool is available, so the QA runs as an independent process separate from this conversation. That subagent must run with the same model you are running as (the active/main model). Never use the model configured for /critique for this pass: that one is reserved for deep critical reviews of any subject.",
     "",
     closing,
     "",

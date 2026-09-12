@@ -126,6 +126,9 @@ test("directive is scope-bounded and evidence-based", () => {
   assert.match(directive, /verification\/remediation cycles/i);
   assert.ok(directive.includes(String(AUTOCRITIQUE_CODE_INTERNAL_BUDGET)));
   assert.match(directive, /stay(s)? inside the task/i);
+  assert.match(directive, /delegate the adversarial exploration to a subagent/i);
+  assert.match(directive, /same model you are running as/i);
+  assert.match(directive, /[Nn]ever use the model configured for \/critique/);
   assert.match(directive, /Never claim the work is done without evidence/i);
   assert.match(directive, /- Fixed:/);
   assert.match(directive, /- Tests:/);

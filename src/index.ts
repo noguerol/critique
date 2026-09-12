@@ -33,9 +33,13 @@ import {
   questionsFrequencyLabel,
   type QuestionSuggestion,
   type QuestionsFrequency,
-  type AutoPromptCritiqueLevel,
-  type AutoPromptCritiqueModelSource,
 } from "./prompt-critique.ts";
+
+import {
+  AUTOCRITIQUE_CODE_ROUNDS,
+  normalizeAutocritiqueCodeRounds,
+  planAutocritiqueCode,
+} from "./autocritique-code.ts";
 
 type Mode = "config" | "review" | "view";
 
@@ -96,8 +100,16 @@ async function runWithLoader(
 
 type AutoPromptCritiqueLevel = ReturnType<typeof loadConfig>["autoPromptCritiqueLevel"];
 type AutoPromptCritiqueModelSource = ReturnType<typeof loadConfig>["autoPromptCritiqueModel"];
+type AutocritiqueCodeRounds = ReturnType<typeof loadConfig>["autocritiqueCodeRounds"];
 type PromptCritiqueAction = "accept" | "discard" | "reply";
 type QuestionAction = "a" | "b" | "c" | "dismiss";
+
+/**
+ * In-memory safety net for the agent_settled injection loop. The marker stored
+ * in the session branch is authoritative (it survives reloads); this counter
+ * catches any marker-detection miss. Reset on every genuine user turn.
+ */
+let autocritiqueCodeInjections = 0;
 
 const MAX_VISIBLE_MODELS = 10;
 const PROMPT_CRITIQUE_TIMEOUT_MS = 30_000;
@@ -120,6 +132,9 @@ function updateCritiqueStatus(ctx: ExtensionContext): void {
   }
   if (config.questions) {
     parts.push("❓ q:on");
+  }
+  if (config.autocritiqueCode) {
+    parts.push("🛡 acode:on");
   }
   ctx.ui.setStatus("critique", parts.length > 0 ? parts.join(" ") : "🧠 c:off");
 }
@@ -588,7 +603,10 @@ function configSummary(config: ReturnType<typeof loadConfig>): string {
   const questions = config.questions
     ? `on (${questionsFrequencyLabel(config.questionsFrequency)})`
     : "off";
-  return `model:${config.model || "auto"} | inject:${config.autoInject ? "on" : "off"} | prompt:${promptCritique} | questions:${questions}`;
+  const autocritiqueCode = config.autocritiqueCode
+    ? `on (${config.autocritiqueCodeRounds})`
+    : "off";
+  return `model:${config.model || "auto"} | inject:${config.autoInject ? "on" : "off"} | acode:${autocritiqueCode} | prompt:${promptCritique} | questions:${questions}`;
 }
 
 function configMenuItems(config: ReturnType<typeof loadConfig>): SelectItem[] {
@@ -602,6 +620,18 @@ function configMenuItems(config: ReturnType<typeof loadConfig>): SelectItem[] {
       value: "autoInject",
       label: "Auto-inject",
       description: config.autoInject ? "on" : "off",
+    },
+    {
+      value: "autocritiqueCode",
+      label: "Autocritique code",
+      description: config.autocritiqueCode
+        ? `on (${config.autocritiqueCodeRounds} round${config.autocritiqueCodeRounds === 1 ? "" : "s"})`
+        : "off",
+    },
+    {
+      value: "autocritiqueCodeRounds",
+      label: "Autocritique code rounds",
+      description: `${config.autocritiqueCodeRounds}`,
     },
     {
       value: "autoPromptCritique",
@@ -748,6 +778,13 @@ async function handleConfig(ctx: ExtensionCommandContext): Promise<void> {
         config.autoInject = !config.autoInject;
         changed = true;
         break;
+      case "autocritiqueCode":
+        config.autocritiqueCode = !config.autocritiqueCode;
+        changed = true;
+        break;
+      case "autocritiqueCodeRounds":
+        changed = await editAutocritiqueCodeRounds(ctx, config);
+        break;
       case "autoPromptCritique":
         config.autoPromptCritique = !config.autoPromptCritique;
         changed = true;
@@ -811,13 +848,111 @@ async function editQuestionsFrequency(
   return true;
 }
 
+async function editAutocritiqueCodeRounds(
+  ctx: ExtensionCommandContext,
+  config: ReturnType<typeof loadConfig>,
+): Promise<boolean> {
+  const roundItems: SelectItem[] = AUTOCRITIQUE_CODE_ROUNDS.map((round) => ({
+    value: String(round),
+    label: round === 1 ? "1 round" : `${round} rounds`,
+    description:
+      round === 1
+        ? "one adversarial QA pass after each user turn"
+        : `${round} sequential QA passes after each user turn`,
+  }));
+  const choice = await chooseConfigItem(
+    ctx,
+    "Autocritique code rounds",
+    roundItems,
+    String(config.autocritiqueCodeRounds),
+  );
+  if (choice === undefined) return false;
+  config.autocritiqueCodeRounds = normalizeAutocritiqueCodeRounds(Number(choice));
+  return true;
+}
+
+/**
+ * After the working agent fully settles, inject one bounded adversarial QA pass
+ * when autocritique-code is enabled. Skipped unless the last episode did real
+ * work, so pure chat turns are left alone.
+ */
+async function maybeAutocritiqueCode(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+  const config = loadConfig();
+  if (!config.autocritiqueCode) return;
+
+  const branch = ctx.sessionManager.getBranch();
+  const { listUserPrompts, extractWorkSteps } = await import("./work-step.ts");
+  const steps = extractWorkSteps(branch, 1);
+  const lastStep = steps[steps.length - 1];
+
+  const plan = planAutocritiqueCode({
+    enabled: config.autocritiqueCode,
+    hasUI: ctx.hasUI,
+    idle: ctx.isIdle(),
+    maxRounds: config.autocritiqueCodeRounds,
+    userPrompts: listUserPrompts(branch),
+    lastStepHasToolCalls: (lastStep?.toolCalls.length ?? 0) > 0,
+    injections: autocritiqueCodeInjections,
+  });
+  autocritiqueCodeInjections = plan.injections;
+  if (!plan.inject || !plan.directive) return;
+
+  try {
+    pi.sendUserMessage(plan.directive, { deliverAs: "followUp" });
+    ctx.ui.notify(
+      `Autocritique code: adversarial QA pass ${plan.round}/${config.autocritiqueCodeRounds} injected.`,
+      "info",
+    );
+  } catch (error) {
+    ctx.ui.notify(
+      `Autocritique code could not inject the QA pass: ${error instanceof Error ? error.message : String(error)}`,
+      "warning",
+    );
+  }
+}
+
+async function handleAutocritiqueCodeCommand(
+  ctx: ExtensionCommandContext,
+  arg: string,
+): Promise<void> {
+  const config = loadConfig();
+  const value = arg.trim().toLowerCase();
+  if (value === "on" || value === "off") {
+    config.autocritiqueCode = value === "on";
+  } else if (/^[123]$/.test(value)) {
+    config.autocritiqueCode = true;
+    config.autocritiqueCodeRounds = normalizeAutocritiqueCodeRounds(Number(value));
+  } else if (!value) {
+    config.autocritiqueCode = !config.autocritiqueCode;
+  } else {
+    ctx.ui.notify("Usage: /critique autocritique-code [on|off|1|2|3]", "warning");
+    return;
+  }
+
+  saveConfig(config);
+  updateCritiqueStatus(ctx);
+  ctx.ui.notify(
+    config.autocritiqueCode
+      ? `Autocritique code on — ${config.autocritiqueCodeRounds} QA pass(es) per user turn.`
+      : "Autocritique code off.",
+    "info",
+  );
+}
+
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     updateCritiqueStatus(ctx);
   });
 
+  pi.on("agent_settled", async (_event, ctx) => {
+    await maybeAutocritiqueCode(pi, ctx);
+  });
+
   pi.on("input", async (event, ctx) => {
     if (event.source === "extension") return { action: "continue" as const };
+
+    // A genuine user turn resets the autocritique-code budget.
+    autocritiqueCodeInjections = 0;
 
     // First, check if the questions feature wants to ask a clarifying question.
     const questionsTransformed = await handleQuestions(ctx, event.text);
@@ -837,11 +972,20 @@ export default function (pi: ExtensionAPI) {
       const items: AutocompleteItem[] = [
         { value: "config", label: "config" },
         { value: "view", label: "view" },
+        { value: "autocritique-code on", label: "autocritique-code on" },
+        { value: "autocritique-code off", label: "autocritique-code off" },
       ];
       const filtered = items.filter((item) => item.value.startsWith(prefix));
       return filtered.length > 0 ? filtered : null;
     },
     handler: async (args, ctx) => {
+      const trimmed = args.trim();
+      const autocritiqueMatch = trimmed.match(/^(autocritique-code|autocritique|acode)\b/i);
+      if (autocritiqueMatch) {
+        await handleAutocritiqueCodeCommand(ctx, trimmed.slice(autocritiqueMatch[0].length));
+        return;
+      }
+
       const parsed = parseArgs(args);
       if (parsed.mode === "config") {
         await handleConfig(ctx);

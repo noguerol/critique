@@ -95,8 +95,22 @@ function isUserEntry(entry: SessionEntry): boolean {
 }
 
 /**
+ * All user-prompt texts in a branch, oldest first. Used by autocritique-code to
+ * detect its own injected directives and count passes since the last genuine
+ * user turn (the episode splitter would hide them, since it only reports steps
+ * that contain work).
+ */
+export function listUserPrompts(branch: SessionEntry[]): string[] {
+  const prompts: string[] = [];
+  for (const entry of branch) {
+    if (isUserEntry(entry)) prompts.push(contentText(messageOf(entry).content));
+  }
+  return prompts;
+}
+
+/**
  * Extract the most recent work steps from a session branch (root → leaf).
- * Returns up to `count` steps, newest last. Episodes without work (e.g. a
+ * Returns up to `count` steps, newest first. Episodes without work (e.g. a
  * bare "/critique" prompt) are skipped.
  */
 export function extractWorkSteps(branch: SessionEntry[], count: number): WorkStep[] {

@@ -15,6 +15,8 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type Message, type Model, uuidv7 } from "@earendil-works/pi-ai";
 
+import { isAutocritiqueCodePrompt } from "./autocritique-code.ts";
+
 export type AutoPromptCritiqueLevel = "inconsistencies" | "critical" | "corrosive";
 export type AutoPromptCritiqueModelSource = "working" | "critique";
 export type QuestionsFrequency = "essential" | "normal" | "verbose";
@@ -92,6 +94,8 @@ export function isAmbiguityCandidate(
   if (trimmed.startsWith("/") || trimmed.startsWith("!")) return false;
   // Never re-ask about an instruction we already clarified.
   if (trimmed.includes("[Questions answer]")) return false;
+  // Never treat an injected adversarial QA pass as a user instruction.
+  if (isAutocritiqueCodePrompt(trimmed)) return false;
 
   const words = trimmed.split(/\s+/).filter(Boolean);
   const wordCount = words.length;
@@ -291,7 +295,8 @@ export function isPromptCritiqueCandidate(
     trimmed.includes("[Critique accepted by the user]") ||
     trimmed.includes("[Critique solution accepted by the user]") ||
     trimmed.includes("[User reply to Critique]") ||
-    trimmed.includes("[Questions answer]")
+    trimmed.includes("[Questions answer]") ||
+    isAutocritiqueCodePrompt(trimmed)
   ) {
     return false;
   }

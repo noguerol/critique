@@ -36,7 +36,9 @@ import {
 } from "./prompt-critique.ts";
 
 import {
+  AUTOCRITIQUE_CODE_ITERATIONS,
   AUTOCRITIQUE_CODE_ROUNDS,
+  normalizeAutocritiqueCodeIterations,
   normalizeAutocritiqueCodeRounds,
   planAutocritiqueCode,
 } from "./autocritique-code.ts";
@@ -604,7 +606,7 @@ function configSummary(config: ReturnType<typeof loadConfig>): string {
     ? `on (${questionsFrequencyLabel(config.questionsFrequency)})`
     : "off";
   const autocritiqueCode = config.autocritiqueCode
-    ? `on (${config.autocritiqueCodeRounds})`
+    ? `on (${config.autocritiqueCodeRounds} pass${config.autocritiqueCodeRounds === 1 ? "" : "es"} × ${config.autocritiqueCodeIterations} cycle${config.autocritiqueCodeIterations === 1 ? "" : "s"})`
     : "off";
   return `model:${config.model || "auto"} | inject:${config.autoInject ? "on" : "off"} | acode:${autocritiqueCode} | prompt:${promptCritique} | questions:${questions}`;
 }
@@ -625,13 +627,18 @@ function configMenuItems(config: ReturnType<typeof loadConfig>): SelectItem[] {
       value: "autocritiqueCode",
       label: "Autocritique code",
       description: config.autocritiqueCode
-        ? `on (${config.autocritiqueCodeRounds} round${config.autocritiqueCodeRounds === 1 ? "" : "s"}, active model)`
+        ? `on (${config.autocritiqueCodeRounds} round${config.autocritiqueCodeRounds === 1 ? "" : "s"} × ${config.autocritiqueCodeIterations} cycle${config.autocritiqueCodeIterations === 1 ? "" : "s"}, active model)`
         : "off",
     },
     {
       value: "autocritiqueCodeRounds",
       label: "Autocritique code rounds",
       description: `${config.autocritiqueCodeRounds}`,
+    },
+    {
+      value: "autocritiqueCodeIterations",
+      label: "Autocritique code iterations",
+      description: `${config.autocritiqueCodeIterations}`,
     },
     {
       value: "autoPromptCritique",
@@ -785,6 +792,9 @@ async function handleConfig(ctx: ExtensionCommandContext): Promise<void> {
       case "autocritiqueCodeRounds":
         changed = await editAutocritiqueCodeRounds(ctx, config);
         break;
+      case "autocritiqueCodeIterations":
+        changed = await editAutocritiqueCodeIterations(ctx, config);
+        break;
       case "autoPromptCritique":
         config.autoPromptCritique = !config.autoPromptCritique;
         changed = true;
@@ -871,6 +881,32 @@ async function editAutocritiqueCodeRounds(
   return true;
 }
 
+async function editAutocritiqueCodeIterations(
+  ctx: ExtensionCommandContext,
+  config: ReturnType<typeof loadConfig>,
+): Promise<boolean> {
+  const iterationItems: SelectItem[] = AUTOCRITIQUE_CODE_ITERATIONS.map((iterations) => ({
+    value: String(iterations),
+    label:
+      iterations === 1
+        ? "1 iteration"
+        : `${iterations} iterations`,
+    description:
+      iterations === 1
+        ? "single verify/remediate cycle inside the pass (default)"
+        : `up to ${iterations} verify/remediate cycles inside the pass`,
+  }));
+  const choice = await chooseConfigItem(
+    ctx,
+    "Autocritique code iterations",
+    iterationItems,
+    String(config.autocritiqueCodeIterations),
+  );
+  if (choice === undefined) return false;
+  config.autocritiqueCodeIterations = normalizeAutocritiqueCodeIterations(Number(choice));
+  return true;
+}
+
 /**
  * After the working agent fully settles, inject one bounded adversarial QA pass
  * when autocritique-code is enabled. Skipped unless the last episode did real
@@ -893,6 +929,7 @@ async function maybeAutocritiqueCode(pi: ExtensionAPI, ctx: ExtensionContext): P
     userPrompts: listUserPrompts(branch),
     lastStepHasToolCalls: (latestStep?.toolCalls.length ?? 0) > 0,
     injections: autocritiqueCodeInjections,
+    iterations: config.autocritiqueCodeIterations,
   });
   autocritiqueCodeInjections = plan.injections;
   if (!plan.inject || !plan.directive) return;
@@ -917,23 +954,36 @@ async function handleAutocritiqueCodeCommand(
 ): Promise<void> {
   const config = loadConfig();
   const value = arg.trim().toLowerCase();
+  const iterationsMatch = value.match(/^(?:iterations?|iters?|cycles?)\s*=?\s*(\d+)$/);
+  const roundsMatch = value.match(/^rounds?\s*=?\s*(\d+)$/);
   if (value === "on" || value === "off") {
     config.autocritiqueCode = value === "on";
+  } else if (iterationsMatch) {
+    config.autocritiqueCode = true;
+    config.autocritiqueCodeIterations = normalizeAutocritiqueCodeIterations(Number(iterationsMatch[1]));
+  } else if (roundsMatch) {
+    config.autocritiqueCode = true;
+    config.autocritiqueCodeRounds = normalizeAutocritiqueCodeRounds(Number(roundsMatch[1]));
   } else if (/^[123]$/.test(value)) {
     config.autocritiqueCode = true;
     config.autocritiqueCodeRounds = normalizeAutocritiqueCodeRounds(Number(value));
   } else if (!value) {
     config.autocritiqueCode = !config.autocritiqueCode;
   } else {
-    ctx.ui.notify("Usage: /critique autocritique-code [on|off|1|2|3]", "warning");
+    ctx.ui.notify(
+      "Usage: /critique autocritique-code [on|off|1|2|3|rounds N|iterations N]",
+      "warning",
+    );
     return;
   }
 
   saveConfig(config);
   updateCritiqueStatus(ctx);
+  const passWord = config.autocritiqueCodeRounds === 1 ? "pass" : "passes";
+  const cycleWord = config.autocritiqueCodeIterations === 1 ? "cycle" : "cycles";
   ctx.ui.notify(
     config.autocritiqueCode
-      ? `Autocritique code on — ${config.autocritiqueCodeRounds} QA pass(es) per user turn.`
+      ? `Autocritique code on — ${config.autocritiqueCodeRounds} QA ${passWord} per user turn, up to ${config.autocritiqueCodeIterations} verification ${cycleWord} inside each pass.`
       : "Autocritique code off.",
     "info",
   );
@@ -974,6 +1024,7 @@ export default function (pi: ExtensionAPI) {
         { value: "view", label: "view" },
         { value: "autocritique-code on", label: "autocritique-code on" },
         { value: "autocritique-code off", label: "autocritique-code off" },
+        { value: "autocritique-code iterations 2", label: "autocritique-code iterations 2" },
       ];
       const filtered = items.filter((item) => item.value.startsWith(prefix));
       return filtered.length > 0 ? filtered : null;

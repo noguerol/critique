@@ -15,7 +15,7 @@ import type {
   AutoPromptCritiqueLevel,
   AutoPromptCritiqueModelSource,
 } from "./prompt-critique.ts";
-import { normalizeAutocritiqueCodeRounds, type AutocritiqueCodeRounds } from "./autocritique-code.ts";
+import { normalizeAutocritiqueCodeIterations, normalizeAutocritiqueCodeRounds, type AutocritiqueCodeIterations, type AutocritiqueCodeRounds } from "./autocritique-code.ts";
 
 export type QuestionsFrequency = "essential" | "normal" | "verbose";
 
@@ -38,6 +38,8 @@ export interface CritiqueConfig {
   autocritiqueCode: boolean;
   /** How many adversarial QA passes may follow a single user turn. */
   autocritiqueCodeRounds: AutocritiqueCodeRounds;
+  /** Max verification/remediation cycles allowed inside one QA pass. */
+  autocritiqueCodeIterations: AutocritiqueCodeIterations;
 }
 
 export const DEFAULT_CONFIG: CritiqueConfig = {
@@ -50,6 +52,7 @@ export const DEFAULT_CONFIG: CritiqueConfig = {
   questionsFrequency: "normal",
   autocritiqueCode: false,
   autocritiqueCodeRounds: 1,
+  autocritiqueCodeIterations: 1,
 };
 
 export function configFilePath(): string {
@@ -89,6 +92,7 @@ export function loadConfig(): CritiqueConfig {
           ? raw.autocritiqueCode
           : DEFAULT_CONFIG.autocritiqueCode,
       autocritiqueCodeRounds: normalizeAutocritiqueCodeRounds(raw.autocritiqueCodeRounds),
+      autocritiqueCodeIterations: normalizeAutocritiqueCodeIterations(raw.autocritiqueCodeIterations),
     };
   } catch {
     return { ...DEFAULT_CONFIG };

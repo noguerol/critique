@@ -9,11 +9,14 @@ import assert from "node:assert/strict";
 
 import {
   AUTOCRITIQUE_CODE_INTERNAL_BUDGET,
+  AUTOCRITIQUE_CODE_ITERATIONS,
   AUTOCRITIQUE_CODE_MARKER,
+  DEFAULT_AUTOCRITIQUE_CODE_ITERATIONS,
   buildAutocritiqueCodeDirective,
   countTrailingAutocritiqueCodeRounds,
   decideAutocritiqueCode,
   isAutocritiqueCodePrompt,
+  normalizeAutocritiqueCodeIterations,
   normalizeAutocritiqueCodeRounds,
   planAutocritiqueCode,
   type AutocritiqueCodeDecisionInput,
@@ -71,6 +74,21 @@ test("normalizeAutocritiqueCodeRounds accepts only 1|2|3 and defaults to 1", () 
   assert.equal(normalizeAutocritiqueCodeRounds(null), 1);
 });
 
+test("normalizeAutocritiqueCodeIterations defaults to 1 and accepts 1..5", () => {
+  assert.equal(DEFAULT_AUTOCRITIQUE_CODE_ITERATIONS, 1);
+  assert.equal(AUTOCRITIQUE_CODE_INTERNAL_BUDGET, DEFAULT_AUTOCRITIQUE_CODE_ITERATIONS);
+  assert.deepEqual(AUTOCRITIQUE_CODE_ITERATIONS, [1, 2, 3, 4, 5]);
+  for (const iterations of AUTOCRITIQUE_CODE_ITERATIONS) {
+    assert.equal(normalizeAutocritiqueCodeIterations(iterations), iterations);
+  }
+  assert.equal(normalizeAutocritiqueCodeIterations(0), 1);
+  assert.equal(normalizeAutocritiqueCodeIterations(6), 1);
+  assert.equal(normalizeAutocritiqueCodeIterations(2.9), 2);
+  assert.equal(normalizeAutocritiqueCodeIterations("3"), 1);
+  assert.equal(normalizeAutocritiqueCodeIterations(undefined), 1);
+  assert.equal(normalizeAutocritiqueCodeIterations(null), 1);
+});
+
 // --- decision gate (the loop guard) --------------------------------------
 
 function decisionInput(
@@ -123,8 +141,12 @@ test("round budget grows with autocritiqueCodeRounds", () => {
 
 test("directive is scope-bounded and evidence-based", () => {
   const directive = buildAutocritiqueCodeDirective(1, 1);
-  assert.match(directive, /verification\/remediation cycles/i);
-  assert.ok(directive.includes(String(AUTOCRITIQUE_CODE_INTERNAL_BUDGET)));
+  assert.match(directive, /verification\/remediation cycles?/i);
+  assert.match(directive, /one cycle means: stress and verify by execution, fix what you find, then re-run the checks/i);
+  assert.match(
+    buildAutocritiqueCodeDirective(1, 1),
+    /Iterate at most 1 verification\/remediation cycle inside/i,
+  );
   assert.match(directive, /stay(s)? inside the task/i);
   assert.match(directive, /delegate the adversarial exploration to a subagent/i);
   assert.match(directive, /same model you are running as/i);
@@ -134,6 +156,36 @@ test("directive is scope-bounded and evidence-based", () => {
   assert.match(directive, /- Tests:/);
   assert.match(directive, /- Improved:/);
   assert.match(directive, /- Residual risk:/);
+});
+
+test("final directive requires an achieved summary, next steps and an invitation to continue", () => {
+  const directive = buildAutocritiqueCodeDirective(1, 1);
+  assert.match(directive, /Close with a report addressed to the user/i);
+  assert.match(directive, /- Achieved:/);
+  assert.match(directive, /which of those points this pass corrected, hardened or confirmed/i);
+  assert.match(directive, /- Next steps:/);
+  assert.match(directive, /direct invitation to continue with the first one/i);
+  assert.doesNotMatch(directive, /Do not present next steps yet/i);
+});
+
+test("intermediate directive defers the next-steps report to the final pass", () => {
+  const directive = buildAutocritiqueCodeDirective(1, 2);
+  assert.match(directive, /- Achieved:/);
+  assert.doesNotMatch(directive, /- Next steps:/);
+  assert.match(directive, /do not present next steps yet/i);
+  // The deferral must be its own paragraph, not a Markdown lazy continuation of
+  // the "- Residual risk:" bullet.
+  assert.match(
+    directive,
+    /- Residual risk:[^\n]*\n\nFurther adversarial pass\(es\) will follow/,
+  );
+});
+
+test("directive reflects the configured verification-cycle budget", () => {
+  assert.match(buildAutocritiqueCodeDirective(1, 1, 1), /Iterate at most 1 verification\/remediation cycle inside/i);
+  assert.match(buildAutocritiqueCodeDirective(1, 1, 3), /Iterate at most 3 verification\/remediation cycles inside/i);
+  // Out-of-range input falls back to the default of 1.
+  assert.match(buildAutocritiqueCodeDirective(1, 1, 9), /Iterate at most 1 verification\/remediation cycle inside/i);
 });
 
 test("directive announces intermediate and final passes distinctly", () => {
@@ -218,6 +270,14 @@ test("planAutocritiqueCode honours multiple rounds and stops at the cap", () => 
     planInput({ maxRounds: 3, userPrompts: ["go", d, d, d], injections: round3.injections }),
   );
   assert.equal(capped.inject, false);
+});
+
+test("planAutocritiqueCode forwards the configured iterations to the directive", () => {
+  const plan = planAutocritiqueCode(planInput({ iterations: 3 }));
+  assert.match(plan.directive ?? "", /Iterate at most 3 verification\/remediation cycles inside/i);
+
+  const fallback = planAutocritiqueCode(planInput({ iterations: 99 as unknown as 3 }));
+  assert.match(fallback.directive ?? "", /Iterate at most 1 verification\/remediation cycle inside/i);
 });
 
 test("planAutocritiqueCode restarts on a genuine user turn", () => {

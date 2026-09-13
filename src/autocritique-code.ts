@@ -17,6 +17,11 @@ export type AutocritiqueCodeRounds = 1 | 2 | 3;
 
 export const AUTOCRITIQUE_CODE_ROUNDS: AutocritiqueCodeRounds[] = [1, 2, 3];
 
+/** Max verification/remediation cycles the agent may run inside one QA pass. */
+export type AutocritiqueCodeIterations = 1 | 2 | 3 | 4 | 5;
+
+export const AUTOCRITIQUE_CODE_ITERATIONS: AutocritiqueCodeIterations[] = [1, 2, 3, 4, 5];
+
 /**
  * Marker embedded in the injected directive. It is the persistent half of the
  * loop guard: any user message carrying it is an autocritique-code pass, never
@@ -24,14 +29,25 @@ export const AUTOCRITIQUE_CODE_ROUNDS: AutocritiqueCodeRounds[] = [1, 2, 3];
  */
 export const AUTOCRITIQUE_CODE_MARKER = "[Autocritique-Code — Adversarial QA]";
 
-/** Max verification/remediation cycles the agent should attempt inside one pass. */
-export const AUTOCRITIQUE_CODE_INTERNAL_BUDGET = 3;
+/** Default max verification/remediation cycles inside one pass. */
+export const DEFAULT_AUTOCRITIQUE_CODE_ITERATIONS: AutocritiqueCodeIterations = 1;
+
+/** @deprecated Use DEFAULT_AUTOCRITIQUE_CODE_ITERATIONS (kept for compatibility). */
+export const AUTOCRITIQUE_CODE_INTERNAL_BUDGET = DEFAULT_AUTOCRITIQUE_CODE_ITERATIONS;
 
 export const DEFAULT_AUTOCRITIQUE_CODE_ROUNDS: AutocritiqueCodeRounds = 1;
 
 /** Narrow arbitrary config input to a valid round count. */
 export function normalizeAutocritiqueCodeRounds(value: unknown): AutocritiqueCodeRounds {
   return value === 2 || value === 3 ? value : DEFAULT_AUTOCRITIQUE_CODE_ROUNDS;
+}
+
+/** Narrow arbitrary config input to a valid verification-cycle count. */
+export function normalizeAutocritiqueCodeIterations(value: unknown): AutocritiqueCodeIterations {
+  const n = typeof value === "number" ? Math.trunc(value) : Number.NaN;
+  return (AUTOCRITIQUE_CODE_ITERATIONS as number[]).includes(n)
+    ? (n as AutocritiqueCodeIterations)
+    : DEFAULT_AUTOCRITIQUE_CODE_ITERATIONS;
 }
 
 /** True when a user message is an injected autocritique-code directive. */
@@ -101,6 +117,8 @@ export interface AutocritiqueCodePlanInput {
   lastStepHasToolCalls: boolean;
   /** In-memory counter, the safety net for the persistent marker count. */
   injections: number;
+  /** Configured verification/remediation cycles allowed inside the pass. */
+  iterations?: AutocritiqueCodeIterations;
 }
 
 export interface AutocritiqueCodePlan {
@@ -140,7 +158,11 @@ export function planAutocritiqueCode(input: AutocritiqueCodePlanInput): Autocrit
   return {
     inject: true,
     round,
-    directive: buildAutocritiqueCodeDirective(round, input.maxRounds),
+    directive: buildAutocritiqueCodeDirective(
+      round,
+      input.maxRounds,
+      normalizeAutocritiqueCodeIterations(input.iterations),
+    ),
     injections: round,
   };
 }
@@ -157,9 +179,14 @@ function clampRound(round: number, total: number): { round: number; total: numbe
  * self-review and architectural scope creep, so this version caps the internal
  * cycles, forbids new requirements, and requires evidence for every claim.
  */
-export function buildAutocritiqueCodeDirective(round: number, totalRounds: number): string {
+export function buildAutocritiqueCodeDirective(
+  round: number,
+  totalRounds: number,
+  iterations: number = DEFAULT_AUTOCRITIQUE_CODE_ITERATIONS,
+): string {
   const { round: safeRound, total } = clampRound(round, totalRounds);
   const isFinal = safeRound >= total;
+  const cycles = normalizeAutocritiqueCodeIterations(iterations);
 
   const closing = isFinal
     ? `This is the final adversarial pass (${safeRound} of ${total}). Conclude at the end of it and report, even if something remains open.`
@@ -178,17 +205,26 @@ export function buildAutocritiqueCodeDirective(round: number, totalRounds: numbe
     "   - Contract / type integrity: type boundaries, API and schema compliance, state-mutation safety.",
     "2. Verify by execution, not inspection alone. Run the test suites, linters, type checks and the real execution paths you touched, and read the actual output. If coverage for the risky paths is missing or insufficient, write the missing tests and run them.",
     "3. Remediate instead of reporting. For every real issue: fix it, refactor cleanly when warranted, re-run the verification suite, and confirm there is no regression. Keep fixes minimal and inside the original scope.",
-    `4. Iterate at most ${AUTOCRITIQUE_CODE_INTERNAL_BUDGET} verification/remediation cycles inside this pass. Stop as soon as the executed checks pass and you cannot construct a failing case for the changed behaviour. Do not chase cosmetic nitpicks and do not expand scope; if something genuinely needs a product decision, record it as residual risk instead of inventing new requirements.`,
+    `4. Iterate at most ${cycles} verification/remediation cycle${cycles === 1 ? "" : "s"} inside this pass — one cycle means: stress and verify by execution, fix what you find, then re-run the checks. Stop as soon as the executed checks pass and you cannot construct a failing case for the changed behaviour. Do not chase cosmetic nitpicks and do not expand scope; if something genuinely needs a product decision, record it as residual risk instead of inventing new requirements.`,
     "",
     "Delegate the adversarial exploration to a subagent whenever a parallel-subagent or task-delegation tool is available, so the QA runs as an independent process separate from this conversation. That subagent must run with the same model you are running as (the active/main model). Never use the model configured for /critique for this pass: that one is reserved for deep critical reviews of any subject.",
     "",
     closing,
     "",
-    "Finish with a concise, itemized changelog:",
+    "5. Close with a report addressed to the user, written in the language the user is using. It must be the message they see when the QA ends, and it must contain, in this order:",
+    "- Achieved: a summary of everything the original task accomplished now that the QA is done — what works, what changed and why — and, since the QA exists to protect exactly that result, which of those points this pass corrected, hardened or confirmed.",
     "- Fixed: bugs/regressions broken, each with the check that now proves it.",
     "- Tests: added or updated, and what they cover.",
     "- Improved: net architectural or UX improvements.",
     "- Residual risk: what remains open and why.",
+    ...(isFinal
+      ? [
+          "- Next steps: the project's logical next steps, in dependency order, and finish with a direct invitation to continue with the first one (for example: \"Want me to continue with <first next step>?\"). Propose it now; do not start it.",
+        ]
+      : [
+          "",
+          "Further adversarial pass(es) will follow this one, so do not present next steps yet: the full closing report — including the next steps and the invitation to continue — belongs to the final pass.",
+        ]),
     "",
     "Never claim the work is done without evidence from an executed check.",
   ].join("\n");

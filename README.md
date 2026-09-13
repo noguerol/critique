@@ -10,7 +10,7 @@
 
 Additionally, the **Questions** feature detects ambiguous user input and offers clarifying suggestions before the model acts on it.
 
-The **autocritique-code** feature is a post-implementation QA pass: when the agent settles after doing real work, it injects a bounded adversarial directive that forces the agent to stress its own change, verify by execution, fix what it finds, and report an itemized changelog instead of declaring success.
+The **autocritique-code** feature is a post-implementation QA pass: when the agent settles after doing real work, it injects a bounded adversarial directive that forces the agent to stress its own change, verify by execution, fix what it finds, and close with a report of what was achieved plus the project's next steps instead of declaring success.
 
 ---
 
@@ -34,7 +34,8 @@ The **autocritique-code** feature is a post-implementation QA pass: when the age
 - **Questions feature** — optional clarifying widget, judged by a model, that detects genuinely ambiguous user input and offers three options: two concrete interpretations restated from your wording and a free-text answer; auto-discards after 30 seconds
 - **Questions frequency** — three sensitivity levels: `Essential only` (minimal), `Normal` (moderate), or `Many questions` (high sensitivity)
 - **autocritique-code** — optional post-implementation adversarial QA: after the working agent settles, if the last turn performed real work (at least one tool call), it injects a scope-bounded directive to stress edge cases, verify by execution, remediate and report a changelog; the pass runs on the active model (optionally via an independent subagent), never on the critique model
-- **Bounded QA passes** — `1`–`3` sequential passes per user turn; a persistent in-session marker plus an in-memory counter make self-retriggering impossible, and a genuine user turn resets the budget
+- **Bounded QA passes** — `1`–`3` sequential passes per user turn, each capped at `1`–`5` verification/remediation cycles (default: one cycle); a persistent in-session marker plus an in-memory counter make self-retriggering impossible, and a genuine user turn resets the budget
+- **Closing QA report** — the final pass must close with a summary of everything the task achieved (and therefore what the QA corrected), the project's next steps, and an explicit invitation to continue with the first one
 
 ## Install
 
@@ -99,6 +100,8 @@ To focus the review:
 | `/critique autocritique-code` | Toggle the post-implementation adversarial QA on/off |
 | `/critique autocritique-code on` \| `off` | Enable/disable it explicitly |
 | `/critique autocritique-code 1` \| `2` \| `3` | Enable it and set the number of QA passes per user turn (aliases: `autocritique`, `acode`) |
+| `/critique autocritique-code rounds N` | Enable it and set the number of QA passes per user turn (`N` = `1`–`3`) |
+| `/critique autocritique-code iterations N` | Enable it and set the max verification/remediation cycles inside each pass (`N` = `1`–`5`; aliases: `iter`, `cycle`) |
 
 **Argument parsing:**
 
@@ -208,12 +211,13 @@ The improved directive replaces the original "loop until 100% clean" idea with s
 
 - **Scope-bounded** — it explicitly says this is not a new feature request and not a rewrite; fixes must stay inside the original task.
 - **Execution over inspection** — run the test suites, linters, type checks and the real code paths, and read the output; write the missing tests when coverage is insufficient.
-- **Fix, don't report** — remediate every real issue and re-run verification, with a hard cap of three verification/remediation cycles inside the pass.
+- **Fix, don't report** — remediate every real issue and re-run verification, with a configurable cap on verification/remediation cycles inside the pass (default: **one** cycle, so a pass verifies and fixes what it finds; raise it to `2`–`5` when you want the agent to keep iterating on itself).
 - **No invented requirements** — anything that needs a product decision is recorded as residual risk instead of guessed at.
-- **Evidence required** — the pass must end with an itemized changelog (*Fixed / Tests / Improved / Residual risk*) and may not claim success without an executed check.
+- **Evidence required** — the pass must end with an itemized report (*Achieved / Fixed / Tests / Improved / Residual risk*) backed by executed checks, and may not claim success without one.
+- **Closing report with next steps** — when the QA ends, the agent must tell the user, in their language, what the task accomplished and what the QA corrected, then lay out the project's logical next steps and explicitly invite the user to continue with the first one (in multi-pass mode, this full closing report is required from the final pass).
 - **Independent subagent, same model** — the adversarial exploration is delegated to a parallel subagent as an independent process whenever one is available, and that subagent must run on the active/main model. The model configured for `/critique` is never used for this pass: it is reserved for deep critical reviews of any subject.
 
-Loop safety is enforced independently of the model: the directive carries a stable marker, and the extension counts consecutive markers at the end of the session branch. A `1`–`3` pass budget caps the worst case, an in-memory counter catches any marker-detection miss, and a genuine user turn resets the budget. With the default of one pass, a completed user turn gets exactly one QA pass.
+Loop safety is enforced independently of the model: the directive carries a stable marker, and the extension counts consecutive markers at the end of the session branch. A `1`–`3` pass budget caps the worst case, an in-memory counter catches any marker-detection miss, and a genuine user turn resets the budget. Each pass is additionally capped at `1`–`5` verification/remediation cycles (default: `1`). With the default of one pass and one cycle, a completed user turn gets exactly one focused QA pass.
 
 ## Model Selection
 
@@ -241,7 +245,8 @@ The config is persisted as JSON at `~/.pi/agent/critique.json`:
   "questions": false,
   "questionsFrequency": "normal",
   "autocritiqueCode": false,
-  "autocritiqueCodeRounds": 1
+  "autocritiqueCodeRounds": 1,
+  "autocritiqueCodeIterations": 1
 }
 ```
 
@@ -254,6 +259,7 @@ The config is persisted as JSON at `~/.pi/agent/critique.json`:
 - **`questionsFrequency`** — sensitivity of the Questions feature: `essential` (minimal), `normal` (moderate), or `verbose` (high; "many questions").
 - **`autocritiqueCode`** — when `true`, injects an adversarial QA pass after the working agent settles on a turn that did real work.
 - **`autocritiqueCodeRounds`** — how many sequential QA passes may follow a single user turn: `1` (default), `2`, or `3`.
+- **`autocritiqueCodeIterations`** — max verification/remediation cycles the agent may run inside each QA pass: `1` (default), `2`, `3`, `4`, or `5`. Put it at `1` for a single verify-and-fix cycle, or raise it when you want the agent to keep iterating until the executed checks hold.
 
 The settings menu offers any model with configured auth that's available in pi's registry; the config persists per-machine (in `getAgentDir()`), shared across all projects.
 
@@ -284,7 +290,7 @@ Six-file extension with zero external dependencies (only pi's bundled `@earendil
 - **Advisory formatter** — wraps the review in a "non-mandatory" envelope before injecting as a follow-up user message
 - **Prompt critique** — optional input hook with local trivial-prompt gate, three challenge levels, and ultra-short JSON model output
 - **Questions detection** — size gate + tool-free model judgment of genuine ambiguity (generic "part vs whole"-style readings explicitly banned), three frequency levels; shows a clarifying widget with A/B/C options
-- **autocritique-code** — pure directive builder + anti-loop policy driven by the `agent_settled` event; counts its own markers in the session branch, applies a 1–3 pass budget, and skips turns without real tool work
+- **autocritique-code** — pure directive builder + anti-loop policy driven by the `agent_settled` event; counts its own markers in the session branch, applies a 1–3 pass budget and a configurable 1–5 cycle budget per pass, and skips turns without real tool work
 - **UI** — lazy-loaded pickers/viewers/loaders + 30-second Critique widget + 30-second Questions widget
 
 ## Notes

@@ -33,8 +33,8 @@ The **autocritique-code** feature is a post-implementation QA pass: when the age
 - **Persistent config** — `~/.pi/agent/critique.json` stores model choice, auto-inject, and automatic prompt-critique settings across all projects
 - **Questions feature** — optional clarifying widget, judged by a model, that detects genuinely ambiguous user input and offers three options: two concrete interpretations restated from your wording and a free-text answer; auto-discards after 30 seconds
 - **Questions frequency** — three sensitivity levels: `Essential only` (minimal), `Normal` (moderate), or `Many questions` (high sensitivity)
-- **autocritique-code** — optional post-implementation adversarial QA: after the working agent settles, if the last turn performed real work (at least one tool call), it injects a scope-bounded directive to stress edge cases, verify by execution, remediate and report a changelog; the pass runs on the active model (optionally via an independent subagent), never on the critique model
-- **Bounded QA passes** — `1`–`3` sequential passes per user turn, each capped at `1`–`5` verification/remediation cycles (default: one cycle); a persistent in-session marker plus an in-memory counter make self-retriggering impossible, and a genuine user turn resets the budget
+- **autocritique-code** — optional post-implementation adversarial QA: after the working agent settles, if the last turn performed real work (at least one tool call), it injects a scope-bounded directive to stress edge cases, verify by execution, remediate and report a changelog; the pass runs on the active model (inline in the planner's session by default, optionally via an independent subagent when `autocritiqueCodeRecurse` is enabled), never on the critique model
+- **Bounded QA passes** — `1`–`3` sequential passes per user turn, each capped at `1`–`5` verification/remediation cycles (default: one cycle); a persistent in-session marker plus an in-memory counter make self-retriggering impossible, the QA runs inline by default so multi-agent extensions such as trimegisto cannot trigger cross-session recursion, and a genuine user turn resets the budget
 - **Closing QA report** — the final pass must close with a summary of everything the task achieved (and therefore what the QA corrected), the project's next steps, and an explicit invitation to continue with the first one
 
 ## Install
@@ -102,6 +102,7 @@ To focus the review:
 | `/critique autocritique-code 1` \| `2` \| `3` | Enable it and set the number of QA passes per user turn (aliases: `autocritique`, `acode`) |
 | `/critique autocritique-code rounds N` | Enable it and set the number of QA passes per user turn (`N` = `1`–`3`) |
 | `/critique autocritique-code iterations N` | Enable it and set the max verification/remediation cycles inside each pass (`N` = `1`–`5`; aliases: `iter`, `cycle`) |
+| `/critique autocritique-code recurse on` \| `off` | Toggle whether the QA pass may be delegated to a subagent (default: `off` — prevents a self-reinforcing recursion loop when multi-agent extensions such as trimegisto are active) |
 
 **Argument parsing:**
 
@@ -215,7 +216,7 @@ The improved directive replaces the original "loop until 100% clean" idea with s
 - **No invented requirements** — anything that needs a product decision is recorded as residual risk instead of guessed at.
 - **Evidence required** — the pass must end with an itemized report (*Achieved / Fixed / Tests / Improved / Residual risk*) backed by executed checks, and may not claim success without one.
 - **Closing report with next steps** — when the QA ends, the agent must tell the user, in their language, what the task accomplished and what the QA corrected, then lay out the project's logical next steps and explicitly invite the user to continue with the first one (in multi-pass mode, this full closing report is required from the final pass).
-- **Independent subagent, same model** — the adversarial exploration is delegated to a parallel subagent as an independent process whenever one is available, and that subagent must run on the active/main model. The model configured for `/critique` is never used for this pass: it is reserved for deep critical reviews of any subject.
+- **Inline by default; opt-in subagent delegation** — the QA pass runs inline in the planner's session by default. This keeps the critique on the planner's final response (the one that has already reconciled its sub-agents) and prevents the self-reinforcing recursion that otherwise occurs with multi-agent extensions such as trimegisto: a delegated QA settles in its own session, fires `agent_settled`, and would otherwise trigger another autocritique pass that spawns more subagents. Set `autocritiqueCodeRecurse: true` to restore the original "delegate to a subagent when available" behaviour (the subagent must still run on the active/main model; the model configured for `/critique` is never used for this pass).
 
 Loop safety is enforced independently of the model: the directive carries a stable marker, and the extension counts consecutive markers at the end of the session branch. A `1`–`3` pass budget caps the worst case, an in-memory counter catches any marker-detection miss, and a genuine user turn resets the budget. Each pass is additionally capped at `1`–`5` verification/remediation cycles (default: `1`). With the default of one pass and one cycle, a completed user turn gets exactly one focused QA pass.
 
@@ -246,7 +247,8 @@ The config is persisted as JSON at `~/.pi/agent/critique.json`:
   "questionsFrequency": "normal",
   "autocritiqueCode": false,
   "autocritiqueCodeRounds": 1,
-  "autocritiqueCodeIterations": 1
+  "autocritiqueCodeIterations": 1,
+  "autocritiqueCodeRecurse": false
 }
 ```
 
@@ -260,6 +262,7 @@ The config is persisted as JSON at `~/.pi/agent/critique.json`:
 - **`autocritiqueCode`** — when `true`, injects an adversarial QA pass after the working agent settles on a turn that did real work.
 - **`autocritiqueCodeRounds`** — how many sequential QA passes may follow a single user turn: `1` (default), `2`, or `3`.
 - **`autocritiqueCodeIterations`** — max verification/remediation cycles the agent may run inside each QA pass: `1` (default), `2`, `3`, `4`, or `5`. Put it at `1` for a single verify-and-fix cycle, or raise it when you want the agent to keep iterating until the executed checks hold.
+- **`autocritiqueCodeRecurse`** — when `true`, the directive tells the agent to delegate the QA pass to a subagent (the original behaviour). When `false` (default), the directive forbids delegation so the QA runs inline in the planner's session, which prevents the recursive agent spawn that occurs with multi-agent extensions such as trimegisto. Switch it to `true` only when you want subagent delegation and accept that the QA may settle in a separate session whose own `agent_settled` would normally trigger another autocritique pass.
 
 The settings menu offers any model with configured auth that's available in pi's registry; the config persists per-machine (in `getAgentDir()`), shared across all projects.
 
@@ -299,7 +302,7 @@ Six-file extension with zero external dependencies (only pi's bundled `@earendil
 - In TUI mode the review runs behind a cancelable loader (Esc aborts) and `/critique view` opens a scrollable Markdown viewer. Automatic prompt critique appears as a compact `Critique` widget with a 30-second auto-discard timeout. The Questions feature appears as a `Questions` widget with the same timeout. In RPC mode reviews are surfaced through notifications/dialogs; print mode logs manual reviews to stdout and skips automatic prompt critique and questions.
 - Provider errors (bad keys, insufficient balance, rate limit) are surfaced as errors instead of silently producing empty reviews.
 - Reviews are capped at 16,000 chars to keep the injected follow-up reasonable; longer reviews are truncated with `… [review truncated]`.
-- autocritique-code only runs in dialog-capable modes (TUI/RPC) and only after a turn that performed at least one tool call. Each injected pass is a real user message, so it gets its own work episode and never contaminates the previous one during a later manual `/critique`.
+- autocritique-code only runs in dialog-capable modes (TUI/RPC) and only after a turn that performed at least one tool call. Each injected pass is a real user message, so it gets its own work episode and never contaminates the previous one during a later manual `/critique`. By default the QA runs inline in the planner's session and never delegates to a subagent; set `autocritiqueCodeRecurse: true` to opt back into the original "delegate when available" behaviour (note that this is incompatible with multi-agent extensions such as trimegisto, which will cause a self-reinforcing recursion loop unless the extension itself cooperates with critique's anti-loop marker).
 
 ## License
 

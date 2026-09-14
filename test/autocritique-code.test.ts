@@ -148,7 +148,6 @@ test("directive is scope-bounded and evidence-based", () => {
     /Iterate at most 1 verification\/remediation cycle inside/i,
   );
   assert.match(directive, /stay(s)? inside the task/i);
-  assert.match(directive, /delegate the adversarial exploration to a subagent/i);
   assert.match(directive, /same model you are running as/i);
   assert.match(directive, /[Nn]ever use the model configured for \/critique/);
   assert.match(directive, /Never claim the work is done without evidence/i);
@@ -156,6 +155,36 @@ test("directive is scope-bounded and evidence-based", () => {
   assert.match(directive, /- Tests:/);
   assert.match(directive, /- Improved:/);
   assert.match(directive, /- Residual risk:/);
+});
+
+test("directive defaults to inline (no subagent delegation) to prevent recursion", () => {
+  // The default must forbid delegation so a delegated QA cannot spawn a
+  // recursive loop with multi-agent extensions (e.g. trimegisto).
+  const directive = buildAutocritiqueCodeDirective(1, 1);
+  assert.match(directive, /Do NOT delegate this QA pass/i);
+  assert.match(directive, /run the adversarial exploration inline/i);
+  assert.match(directive, /self-reinforcing loop/i);
+  assert.doesNotMatch(directive, /delegate the adversarial exploration to a subagent/i);
+});
+
+test("directive allows subagent delegation when recurse=true", () => {
+  // Opt-in restores the original behaviour so users who want delegation can
+  // still get it, with the explicit caveat that this may recurse with
+  // multi-agent extensions.
+  const directive = buildAutocritiqueCodeDirective(1, 1, 1, true);
+  assert.match(directive, /delegate the adversarial exploration to a subagent/i);
+  assert.match(directive, /same model you are running as/i);
+  assert.doesNotMatch(directive, /Do NOT delegate this QA pass/i);
+  assert.doesNotMatch(directive, /self-reinforcing loop/i);
+});
+
+test("buildAutocritiqueCodeDirective treats an undefined recurse as inline (default)", () => {
+  // Explicit and implicit defaults must match: callers that don't pass the
+  // parameter must get the no-recursion directive.
+  const explicit = buildAutocritiqueCodeDirective(1, 1, 1, false);
+  const implicit = buildAutocritiqueCodeDirective(1, 1, 1);
+  assert.equal(explicit, implicit);
+  assert.match(explicit, /Do NOT delegate this QA pass/i);
 });
 
 test("final directive requires an achieved summary, next steps and an invitation to continue", () => {
@@ -278,6 +307,20 @@ test("planAutocritiqueCode forwards the configured iterations to the directive",
 
   const fallback = planAutocritiqueCode(planInput({ iterations: 99 as unknown as 3 }));
   assert.match(fallback.directive ?? "", /Iterate at most 1 verification\/remediation cycle inside/i);
+});
+
+test("planAutocritiqueCode forwards recurse=false (default) to the directive", () => {
+  const plan = planAutocritiqueCode(planInput());
+  assert.ok(plan.directive);
+  assert.match(plan.directive, /Do NOT delegate this QA pass/i);
+  assert.doesNotMatch(plan.directive, /delegate the adversarial exploration to a subagent/i);
+});
+
+test("planAutocritiqueCode forwards recurse=true to the directive", () => {
+  const plan = planAutocritiqueCode(planInput({ recurse: true }));
+  assert.ok(plan.directive);
+  assert.match(plan.directive, /delegate the adversarial exploration to a subagent/i);
+  assert.doesNotMatch(plan.directive, /Do NOT delegate this QA pass/i);
 });
 
 test("planAutocritiqueCode restarts on a genuine user turn", () => {

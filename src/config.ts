@@ -40,6 +40,16 @@ export interface CritiqueConfig {
   autocritiqueCodeRounds: AutocritiqueCodeRounds;
   /** Max verification/remediation cycles allowed inside one QA pass. */
   autocritiqueCodeIterations: AutocritiqueCodeIterations;
+  /**
+   * When `true`, the autocritique-code directive tells the agent to delegate
+   * the QA pass to a subagent (the original behaviour). When `false` (default),
+   * the directive forbids delegation so the QA runs inline in the planner's
+   * session, which prevents a self-reinforcing recursion when multi-agent
+   * extensions such as trimegisto are active: a delegated QA settles in its
+   * own session, fires `agent_settled`, and would otherwise trigger another
+   * autocritique pass that spawns more subagents.
+   */
+  autocritiqueCodeRecurse: boolean;
 }
 
 export const DEFAULT_CONFIG: CritiqueConfig = {
@@ -53,6 +63,7 @@ export const DEFAULT_CONFIG: CritiqueConfig = {
   autocritiqueCode: false,
   autocritiqueCodeRounds: 1,
   autocritiqueCodeIterations: 1,
+  autocritiqueCodeRecurse: false,
 };
 
 export function configFilePath(): string {
@@ -93,6 +104,10 @@ export function loadConfig(): CritiqueConfig {
           : DEFAULT_CONFIG.autocritiqueCode,
       autocritiqueCodeRounds: normalizeAutocritiqueCodeRounds(raw.autocritiqueCodeRounds),
       autocritiqueCodeIterations: normalizeAutocritiqueCodeIterations(raw.autocritiqueCodeIterations),
+      autocritiqueCodeRecurse:
+        typeof raw.autocritiqueCodeRecurse === "boolean"
+          ? raw.autocritiqueCodeRecurse
+          : DEFAULT_CONFIG.autocritiqueCodeRecurse,
     };
   } catch {
     return { ...DEFAULT_CONFIG };

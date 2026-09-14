@@ -606,7 +606,7 @@ function configSummary(config: ReturnType<typeof loadConfig>): string {
     ? `on (${questionsFrequencyLabel(config.questionsFrequency)})`
     : "off";
   const autocritiqueCode = config.autocritiqueCode
-    ? `on (${config.autocritiqueCodeRounds} pass${config.autocritiqueCodeRounds === 1 ? "" : "es"} × ${config.autocritiqueCodeIterations} cycle${config.autocritiqueCodeIterations === 1 ? "" : "s"})`
+    ? `on (${config.autocritiqueCodeRounds} pass${config.autocritiqueCodeRounds === 1 ? "" : "es"} × ${config.autocritiqueCodeIterations} cycle${config.autocritiqueCodeIterations === 1 ? "" : "s"}, active model${config.autocritiqueCodeRecurse ? "; subagents allowed" : "; inline"})`
     : "off";
   return `model:${config.model || "auto"} | inject:${config.autoInject ? "on" : "off"} | acode:${autocritiqueCode} | prompt:${promptCritique} | questions:${questions}`;
 }
@@ -639,6 +639,13 @@ function configMenuItems(config: ReturnType<typeof loadConfig>): SelectItem[] {
       value: "autocritiqueCodeIterations",
       label: "Autocritique code iterations",
       description: `${config.autocritiqueCodeIterations}`,
+    },
+    {
+      value: "autocritiqueCodeRecurse",
+      label: "Autocritique code recurse",
+      description: config.autocritiqueCodeRecurse
+        ? "on (delegate QA to subagent — may recurse with trimegisto)"
+        : "off (inline QA; default — prevents trimegisto recursion)",
     },
     {
       value: "autoPromptCritique",
@@ -795,6 +802,10 @@ async function handleConfig(ctx: ExtensionCommandContext): Promise<void> {
       case "autocritiqueCodeIterations":
         changed = await editAutocritiqueCodeIterations(ctx, config);
         break;
+      case "autocritiqueCodeRecurse":
+        config.autocritiqueCodeRecurse = !config.autocritiqueCodeRecurse;
+        changed = true;
+        break;
       case "autoPromptCritique":
         config.autoPromptCritique = !config.autoPromptCritique;
         changed = true;
@@ -930,6 +941,7 @@ async function maybeAutocritiqueCode(pi: ExtensionAPI, ctx: ExtensionContext): P
     lastStepHasToolCalls: (latestStep?.toolCalls.length ?? 0) > 0,
     injections: autocritiqueCodeInjections,
     iterations: config.autocritiqueCodeIterations,
+    recurse: config.autocritiqueCodeRecurse,
   });
   autocritiqueCodeInjections = plan.injections;
   if (!plan.inject || !plan.directive) return;
@@ -956,6 +968,7 @@ async function handleAutocritiqueCodeCommand(
   const value = arg.trim().toLowerCase();
   const iterationsMatch = value.match(/^(?:iterations?|iters?|cycles?)\s*=?\s*(\d+)$/);
   const roundsMatch = value.match(/^rounds?\s*=?\s*(\d+)$/);
+  const recurseMatch = value.match(/^recurse\s*=?\s*(on|off)$/);
   if (value === "on" || value === "off") {
     config.autocritiqueCode = value === "on";
   } else if (iterationsMatch) {
@@ -964,6 +977,8 @@ async function handleAutocritiqueCodeCommand(
   } else if (roundsMatch) {
     config.autocritiqueCode = true;
     config.autocritiqueCodeRounds = normalizeAutocritiqueCodeRounds(Number(roundsMatch[1]));
+  } else if (recurseMatch) {
+    config.autocritiqueCodeRecurse = recurseMatch[1] === "on";
   } else if (/^[123]$/.test(value)) {
     config.autocritiqueCode = true;
     config.autocritiqueCodeRounds = normalizeAutocritiqueCodeRounds(Number(value));
@@ -971,7 +986,7 @@ async function handleAutocritiqueCodeCommand(
     config.autocritiqueCode = !config.autocritiqueCode;
   } else {
     ctx.ui.notify(
-      "Usage: /critique autocritique-code [on|off|1|2|3|rounds N|iterations N]",
+      "Usage: /critique autocritique-code [on|off|1|2|3|rounds N|iterations N|recurse on|off]",
       "warning",
     );
     return;
@@ -983,7 +998,7 @@ async function handleAutocritiqueCodeCommand(
   const cycleWord = config.autocritiqueCodeIterations === 1 ? "cycle" : "cycles";
   ctx.ui.notify(
     config.autocritiqueCode
-      ? `Autocritique code on — ${config.autocritiqueCodeRounds} QA ${passWord} per user turn, up to ${config.autocritiqueCodeIterations} verification ${cycleWord} inside each pass.`
+      ? `Autocritique code on — ${config.autocritiqueCodeRounds} QA ${passWord} per user turn, up to ${config.autocritiqueCodeIterations} verification ${cycleWord} inside each pass, ${config.autocritiqueCodeRecurse ? "subagent delegation allowed" : "inline (no delegation; default to prevent recursion)"}.`
       : "Autocritique code off.",
     "info",
   );
@@ -1025,6 +1040,8 @@ export default function (pi: ExtensionAPI) {
         { value: "autocritique-code on", label: "autocritique-code on" },
         { value: "autocritique-code off", label: "autocritique-code off" },
         { value: "autocritique-code iterations 2", label: "autocritique-code iterations 2" },
+        { value: "autocritique-code recurse off", label: "autocritique-code recurse off" },
+        { value: "autocritique-code recurse on", label: "autocritique-code recurse on" },
       ];
       const filtered = items.filter((item) => item.value.startsWith(prefix));
       return filtered.length > 0 ? filtered : null;

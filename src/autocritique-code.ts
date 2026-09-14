@@ -119,6 +119,17 @@ export interface AutocritiqueCodePlanInput {
   injections: number;
   /** Configured verification/remediation cycles allowed inside the pass. */
   iterations?: AutocritiqueCodeIterations;
+  /**
+   * When `false` (default), the directive forbids delegating the QA pass to a
+   * subagent or parallel process. This keeps the critique inline in the
+   * planner's session and prevents the recursive spawn pattern that occurs
+   * with multi-agent extensions (e.g. trimegisto): a delegated QA settles,
+   * fires `agent_settled` again, and would otherwise start a new pass that
+   * spawns more subagents, ad infinitum.
+   *
+   * Set to `true` to restore the original "delegate when available" behaviour.
+   */
+  recurse?: boolean;
 }
 
 export interface AutocritiqueCodePlan {
@@ -162,6 +173,7 @@ export function planAutocritiqueCode(input: AutocritiqueCodePlanInput): Autocrit
       round,
       input.maxRounds,
       normalizeAutocritiqueCodeIterations(input.iterations),
+      input.recurse ?? false,
     ),
     injections: round,
   };
@@ -178,11 +190,24 @@ function clampRound(round: number, total: number): { round: number; total: numbe
  * original "loop until 100% clean" idea risks unbounded cost, infinite
  * self-review and architectural scope creep, so this version caps the internal
  * cycles, forbids new requirements, and requires evidence for every claim.
+ *
+ * `recurse` controls whether the directive tells the agent to delegate the QA
+ * pass to a subagent. The default is `false`: when multi-agent extensions such
+ * as trimegisto are active, a delegated QA settles, fires `agent_settled`
+ * again, and would otherwise start a new pass that spawns more subagents,
+ * which is a self-reinforcing recursion. Forcing the QA to run inline in the
+ * planner's session means the persistent marker + rounds budget cap the total
+ * number of passes, no extra sessions are spawned, and the critique lands on
+ * the planner's final response (the one that already reconciled its
+ * sub-agents) — never on a subagent's intermediate output, and never on the
+ * output of a previous critique. Set `recurse: true` to restore the original
+ * "delegate when available" text.
  */
 export function buildAutocritiqueCodeDirective(
   round: number,
   totalRounds: number,
   iterations: number = DEFAULT_AUTOCRITIQUE_CODE_ITERATIONS,
+  recurse: boolean = false,
 ): string {
   const { round: safeRound, total } = clampRound(round, totalRounds);
   const isFinal = safeRound >= total;
@@ -191,6 +216,10 @@ export function buildAutocritiqueCodeDirective(
   const closing = isFinal
     ? `This is the final adversarial pass (${safeRound} of ${total}). Conclude at the end of it and report, even if something remains open.`
     : `This is adversarial pass ${safeRound} of ${total}; ${total - safeRound} further pass(es) will follow after you settle, so fix everything you can now.`;
+
+  const delegation = recurse
+    ? "Delegate the adversarial exploration to a subagent whenever a parallel-subagent or task-delegation tool is available, so the QA runs as an independent process separate from this conversation. That subagent must run with the same model you are running as (the active/main model). Never use the model configured for /critique for this pass: that one is reserved for deep critical reviews of any subject."
+    : "Do NOT delegate this QA pass to a subagent, parallel process, or task-delegation tool. Run the adversarial exploration inline in this conversation so it stays bounded by the rounds budget already enforced above — delegating it would let it settle in a separate session whose own `agent_settled` would trigger another autocritique pass, spawning further subagents in a self-reinforcing loop. The QA uses the same model you are running as (the active/main model); never use the model configured for /critique, which is reserved for deep critical reviews of any subject.";
 
   return [
     AUTOCRITIQUE_CODE_MARKER,
@@ -207,7 +236,7 @@ export function buildAutocritiqueCodeDirective(
     "3. Remediate instead of reporting. For every real issue: fix it, refactor cleanly when warranted, re-run the verification suite, and confirm there is no regression. Keep fixes minimal and inside the original scope.",
     `4. Iterate at most ${cycles} verification/remediation cycle${cycles === 1 ? "" : "s"} inside this pass — one cycle means: stress and verify by execution, fix what you find, then re-run the checks. Stop as soon as the executed checks pass and you cannot construct a failing case for the changed behaviour. Do not chase cosmetic nitpicks and do not expand scope; if something genuinely needs a product decision, record it as residual risk instead of inventing new requirements.`,
     "",
-    "Delegate the adversarial exploration to a subagent whenever a parallel-subagent or task-delegation tool is available, so the QA runs as an independent process separate from this conversation. That subagent must run with the same model you are running as (the active/main model). Never use the model configured for /critique for this pass: that one is reserved for deep critical reviews of any subject.",
+    delegation,
     "",
     closing,
     "",

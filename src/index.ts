@@ -593,6 +593,7 @@ async function chooseConfigItem(
   if (ctx.mode === "tui") return pickModel(ctx, title, items, preselect);
 
   const labels = items.map((item) => `${item.label}${item.description ? ` (${item.description})` : ""}`);
+  ctx.ui.setStatus("critique-config", "select a setting to change it");
   const choice = await ctx.ui.select(title, labels);
   if (choice === undefined) return undefined;
   return items.find((item) => `${item.label}${item.description ? ` (${item.description})` : ""}` === choice)?.value;
@@ -615,67 +616,67 @@ function configMenuItems(config: ReturnType<typeof loadConfig>): SelectItem[] {
   return [
     {
       value: "model",
-      label: "Critique model",
-      description: config.model || "auto; prefer non-working",
+      label: "🧠 Critique model",
+      description: `model used to review edits • ${config.model || "auto; prefer non-working"}`,
     },
     {
       value: "autoInject",
-      label: "Auto-inject",
-      description: config.autoInject ? "on" : "off",
+      label: "♻️ Auto-inject",
+      description: config.autoInject ? "on • inject critiques into the chat" : "off • manual critique only",
     },
     {
       value: "autocritiqueCode",
-      label: "Autocritique code",
+      label: "🛡️ Autocritique code",
       description: config.autocritiqueCode
-        ? `on (${config.autocritiqueCodeRounds} round${config.autocritiqueCodeRounds === 1 ? "" : "s"} × ${config.autocritiqueCodeIterations} cycle${config.autocritiqueCodeIterations === 1 ? "" : "s"}, active model)`
-        : "off",
+        ? `on • ${config.autocritiqueCodeRounds} round${config.autocritiqueCodeRounds === 1 ? "" : "s"} × ${config.autocritiqueCodeIterations} cycle${config.autocritiqueCodeIterations === 1 ? "" : "s"} QA after each turn (active model)`
+        : "off • no automatic code QA",
     },
     {
       value: "autocritiqueCodeRounds",
-      label: "Autocritique code rounds",
-      description: `${config.autocritiqueCodeRounds}`,
+      label: "🔁 Autocritique code rounds",
+      description: `${config.autocritiqueCodeRounds} pass${config.autocritiqueCodeRounds === 1 ? "" : "es"} of adversarial QA after each user turn`,
     },
     {
       value: "autocritiqueCodeIterations",
-      label: "Autocritique code iterations",
-      description: `${config.autocritiqueCodeIterations}`,
+      label: "🔄 Autocritique code iterations",
+      description: `${config.autocritiqueCodeIterations} verify/remediate cycle${config.autocritiqueCodeIterations === 1 ? "" : "s"} inside each pass`,
     },
     {
       value: "autocritiqueCodeRecurse",
-      label: "Autocritique code recurse",
+      label: "🧩 Autocritique code recurse",
       description: config.autocritiqueCodeRecurse
-        ? "on (delegate QA to subagent — may recurse with trimegisto)"
-        : "off (inline QA; default — prevents trimegisto recursion)",
+        ? "on • delegate QA to a subagent (may recurse with trimegisto)"
+        : "off • inline QA; default — prevents trimegisto recursion",
     },
     {
       value: "autoPromptCritique",
-      label: "Prompt critique",
-      description: config.autoPromptCritique ? "on" : "off",
+      label: "💬 Prompt critique",
+      description: config.autoPromptCritique ? "on • review incoming prompts" : "off • no prompt critique",
     },
     {
       value: "autoPromptCritiqueLevel",
-      label: "Prompt level",
-      description: autoPromptCritiqueLevelLabel(config.autoPromptCritiqueLevel),
+      label: "🎯 Prompt level",
+      description: `critique strictness • ${autoPromptCritiqueLevelLabel(config.autoPromptCritiqueLevel)}`,
     },
     {
       value: "autoPromptCritiqueModel",
-      label: "Prompt model",
-      description: autoPromptCritiqueModelSourceLabel(config.autoPromptCritiqueModel),
+      label: "🤖 Prompt model",
+      description: `source of prompt critique • ${autoPromptCritiqueModelSourceLabel(config.autoPromptCritiqueModel)}`,
     },
     {
       value: "questions",
-      label: "Questions",
-      description: config.questions ? "on" : "off",
+      label: "❓ Questions",
+      description: config.questions ? "on • flag unclear questions" : "off • no question critique",
     },
     {
       value: "questionsFrequency",
-      label: "Questions frequency",
-      description: questionsFrequencyLabel(config.questionsFrequency),
+      label: "⚠️ Questions frequency",
+      description: `how sensitive to unclear questions • ${questionsFrequencyLabel(config.questionsFrequency)}`,
     },
     {
       value: "done",
-      label: "Done",
-      description: "save; close",
+      label: "✅ Done",
+      description: "save changes and close the menu",
     },
   ];
 }
@@ -964,44 +965,31 @@ async function handleAutocritiqueCodeCommand(
   ctx: ExtensionCommandContext,
   arg: string,
 ): Promise<void> {
+  // All autocritique-code settings live in the /critique config menu. The
+  // shortcuts here are thin conveniences that only toggle the on/off switch;
+  // every other parameter (rounds, iterations, recurse) is configured from the
+  // menu so a single place manages the whole feature.
   const config = loadConfig();
   const value = arg.trim().toLowerCase();
-  const iterationsMatch = value.match(/^(?:iterations?|iters?|cycles?)\s*=?\s*(\d+)$/);
-  const roundsMatch = value.match(/^rounds?\s*=?\s*(\d+)$/);
-  const recurseMatch = value.match(/^recurse\s*=?\s*(on|off)$/);
   if (value === "on" || value === "off") {
     config.autocritiqueCode = value === "on";
-  } else if (iterationsMatch) {
-    config.autocritiqueCode = true;
-    config.autocritiqueCodeIterations = normalizeAutocritiqueCodeIterations(Number(iterationsMatch[1]));
-  } else if (roundsMatch) {
-    config.autocritiqueCode = true;
-    config.autocritiqueCodeRounds = normalizeAutocritiqueCodeRounds(Number(roundsMatch[1]));
-  } else if (recurseMatch) {
-    config.autocritiqueCodeRecurse = recurseMatch[1] === "on";
-  } else if (/^[123]$/.test(value)) {
-    config.autocritiqueCode = true;
-    config.autocritiqueCodeRounds = normalizeAutocritiqueCodeRounds(Number(value));
-  } else if (!value) {
-    config.autocritiqueCode = !config.autocritiqueCode;
-  } else {
+    saveConfig(config);
+    updateCritiqueStatus(ctx);
     ctx.ui.notify(
-      "Usage: /critique autocritique-code [on|off|1|2|3|rounds N|iterations N|recurse on|off]",
-      "warning",
+      config.autocritiqueCode
+        ? "Autocritique code on — tune rounds/iterations/recurse in /critique config."
+        : "Autocritique code off — tune it in /critique config.",
+      "info",
     );
     return;
   }
 
-  saveConfig(config);
-  updateCritiqueStatus(ctx);
-  const passWord = config.autocritiqueCodeRounds === 1 ? "pass" : "passes";
-  const cycleWord = config.autocritiqueCodeIterations === 1 ? "cycle" : "cycles";
-  ctx.ui.notify(
-    config.autocritiqueCode
-      ? `Autocritique code on — ${config.autocritiqueCodeRounds} QA ${passWord} per user turn, up to ${config.autocritiqueCodeIterations} verification ${cycleWord} inside each pass, ${config.autocritiqueCodeRecurse ? "subagent delegation allowed" : "inline (no delegation; default to prevent recursion)"}.`
-      : "Autocritique code off.",
-    "info",
-  );
+  if (!ctx.hasUI) {
+    ctx.ui.notify("/critique autocritique-code on|off, or use /critique config for full control.", "warning");
+    return;
+  }
+
+  await handleConfig(ctx);
 }
 
 export default function (pi: ExtensionAPI) {

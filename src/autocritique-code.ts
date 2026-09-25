@@ -214,7 +214,7 @@ export function buildAutocritiqueCodeDirective(
   const cycles = normalizeAutocritiqueCodeIterations(iterations);
 
   const closing = isFinal
-    ? `This is the final adversarial pass (${safeRound} of ${total}). Conclude at the end of it and report, even if something remains open.`
+    ? `This is the final adversarial pass (${safeRound} of ${total}). Conclude at the end of it and report, even if something remains open, then continue with the next task as instructed in the closing report: the adversarial pass ends here, the work does not.`
     : `This is adversarial pass ${safeRound} of ${total}; ${total - safeRound} further pass(es) will follow after you settle, so fix everything you can now.`;
 
   const delegation = recurse
@@ -224,7 +224,7 @@ export function buildAutocritiqueCodeDirective(
   return [
     AUTOCRITIQUE_CODE_MARKER,
     "",
-    "Do not present the work as complete yet. You have just finished an implementation; before claiming success, run one adversarial QA pass on it and fix what you find. This stays inside the task you were given — it is not a new feature request and not a rewrite.",
+    "Do not present the work as complete yet. You have just finished an implementation; before claiming success, run one adversarial QA pass on it and fix what you find. The QA and its fixes stay inside the task you were given — this is not a new feature request and not a rewrite.",
     "",
     "Assume the change contains hidden regressions, unhandled edge cases, and architectural oversights. Then:",
     "",
@@ -248,11 +248,13 @@ export function buildAutocritiqueCodeDirective(
     "- Residual risk: what remains open and why.",
     ...(isFinal
       ? [
-          "- Next steps: the project's logical next steps, in dependency order, and finish with a direct invitation to continue with the first one (for example: \"Want me to continue with <first next step>?\"). Propose it now; do not start it.",
+          "- Next steps: the project's logical next steps, in dependency order.",
+          "",
+          "Then do not stop and do not wait for my confirmation: continue autonomously with the first next step. If there is an active long-term plan (for example a plan_*.md checklist managed by the plan tool), continue with its next pending task instead of a brand-new step. Announce in one line what you are starting next, then start it in the same turn so the original task is never interrupted. Stop only for a genuine blocker that needs a product decision, an irreversible or destructive action, or missing credentials — and say so explicitly when that happens.",
         ]
       : [
           "",
-          "Further adversarial pass(es) will follow this one, so do not present next steps yet: the full closing report — including the next steps and the invitation to continue — belongs to the final pass.",
+          "Further adversarial pass(es) will follow this one, so do not present next steps yet: the full closing report — including the next steps and the autonomous continuation — belongs to the final pass.",
         ]),
     "",
     "Never claim the work is done without evidence from an executed check.",

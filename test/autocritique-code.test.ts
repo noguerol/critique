@@ -187,13 +187,18 @@ test("buildAutocritiqueCodeDirective treats an undefined recurse as inline (defa
   assert.match(explicit, /Do NOT delegate this QA pass/i);
 });
 
-test("final directive requires an achieved summary, next steps and an invitation to continue", () => {
+test("final directive requires an achieved summary, next steps and autonomous continuation", () => {
   const directive = buildAutocritiqueCodeDirective(1, 1);
   assert.match(directive, /Close with a report addressed to the user/i);
   assert.match(directive, /- Achieved:/);
   assert.match(directive, /which of those points this pass corrected, hardened or confirmed/i);
   assert.match(directive, /- Next steps:/);
-  assert.match(directive, /direct invitation to continue with the first one/i);
+  assert.match(directive, /continue autonomously with the first next step/i);
+  assert.match(directive, /do not stop and do not wait for my confirmation/i);
+  assert.match(directive, /next pending task instead of a brand-new step/i);
+  assert.match(directive, /so the original task is never interrupted/i);
+  assert.doesNotMatch(directive, /do not start it/i);
+  assert.doesNotMatch(directive, /Want me to continue/i);
   assert.doesNotMatch(directive, /Do not present next steps yet/i);
 });
 
@@ -202,6 +207,11 @@ test("intermediate directive defers the next-steps report to the final pass", ()
   assert.match(directive, /- Achieved:/);
   assert.doesNotMatch(directive, /- Next steps:/);
   assert.match(directive, /do not present next steps yet/i);
+  // The autonomous continuation belongs only to the final pass: an intermediate
+  // pass must not promise or start it (a dangling reference would let the agent
+  // continue prematurely, before the remaining QA passes have run).
+  assert.doesNotMatch(directive, /continue autonomously with the first next step/i);
+  assert.doesNotMatch(directive, /next pending task instead of a brand-new step/i);
   // The deferral must be its own paragraph, not a Markdown lazy continuation of
   // the "- Residual risk:" bullet.
   assert.match(

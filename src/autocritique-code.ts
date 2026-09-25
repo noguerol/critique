@@ -56,6 +56,27 @@ export function isAutocritiqueCodePrompt(text: string): boolean {
 }
 
 /**
+ * Environment variables that mark this process as a delegated subagent, set by
+ * the multi-agent extension that spawned it (trimegisto sets TRIMEGISTO_AGENT_ID
+ * on every subagent process). Such a session must never inject its own
+ * autocritique pass: its first prompt is the delegated task and carries no
+ * marker, so the per-session budgets cannot see the parent's pass and the QA
+ * would fan out recursively across sessions. This is the mechanical half of the
+ * loop guard; the prompt text is only defense in depth.
+ */
+export const SUBAGENT_ENV_MARKERS = ["TRIMEGISTO_AGENT_ID", "PI_CRITIQUE_SUBAGENT"] as const;
+
+/** True when the current process is a delegated subagent session. */
+export function isDelegatedSubagentSession(
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return SUBAGENT_ENV_MARKERS.some((key) => {
+    const value = env[key];
+    return typeof value === "string" && value.trim().length > 0;
+  });
+}
+
+/**
  * Count consecutive autocritique-code directives at the tail of the user
  * prompts (oldest first). Stops at the first genuine user turn, so it measures
  * "passes since the last real request" and resets naturally on the next prompt.
@@ -120,14 +141,15 @@ export interface AutocritiqueCodePlanInput {
   /** Configured verification/remediation cycles allowed inside the pass. */
   iterations?: AutocritiqueCodeIterations;
   /**
-   * When `false` (default), the directive forbids delegating the QA pass to a
-   * subagent or parallel process. This keeps the critique inline in the
-   * planner's session and prevents the recursive spawn pattern that occurs
-   * with multi-agent extensions (e.g. trimegisto): a delegated QA settles,
-   * fires `agent_settled` again, and would otherwise start a new pass that
-   * spawns more subagents, ad infinitum.
+   * When `true` (default), the directive delegates the adversarial QA to a
+   * fresh subagent that starts from context 0; the main agent then reconciles
+   * its findings and fixes everything real.
    *
-   * Set to `true` to restore the original "delegate when available" behaviour.
+   * Set to `false` for inline QA. That keeps the critique in the planner's
+   * session and prevents the recursive spawn pattern that occurs with
+   * multi-agent extensions (e.g. trimegisto): a delegated QA settles, fires
+   * `agent_settled` again, and would otherwise start a new pass that spawns
+   * more subagents, ad infinitum.
    */
   recurse?: boolean;
 }
@@ -173,7 +195,7 @@ export function planAutocritiqueCode(input: AutocritiqueCodePlanInput): Autocrit
       round,
       input.maxRounds,
       normalizeAutocritiqueCodeIterations(input.iterations),
-      input.recurse ?? false,
+      input.recurse ?? true,
     ),
     injections: round,
   };
@@ -192,22 +214,18 @@ function clampRound(round: number, total: number): { round: number; total: numbe
  * cycles, forbids new requirements, and requires evidence for every claim.
  *
  * `recurse` controls whether the directive tells the agent to delegate the QA
- * pass to a subagent. The default is `false`: when multi-agent extensions such
- * as trimegisto are active, a delegated QA settles, fires `agent_settled`
- * again, and would otherwise start a new pass that spawns more subagents,
- * which is a self-reinforcing recursion. Forcing the QA to run inline in the
- * planner's session means the persistent marker + rounds budget cap the total
- * number of passes, no extra sessions are spawned, and the critique lands on
- * the planner's final response (the one that already reconciled its
- * sub-agents) — never on a subagent's intermediate output, and never on the
- * output of a previous critique. Set `recurse: true` to restore the original
- * "delegate when available" text.
+ * to a subagent. The default is `true`: the QA runs in a fresh subagent that
+ * starts from context 0, then the main agent reconciles the findings and fixes
+ * them. Set `recurse: false` for inline QA — the escape hatch for multi-agent
+ * extensions such as trimegisto, where a delegated QA settles, fires
+ * `agent_settled` again, and would otherwise start a new pass that spawns more
+ * subagents, which is a self-reinforcing recursion.
  */
 export function buildAutocritiqueCodeDirective(
   round: number,
   totalRounds: number,
   iterations: number = DEFAULT_AUTOCRITIQUE_CODE_ITERATIONS,
-  recurse: boolean = false,
+  recurse: boolean = true,
 ): string {
   const { round: safeRound, total } = clampRound(round, totalRounds);
   const isFinal = safeRound >= total;
@@ -218,7 +236,7 @@ export function buildAutocritiqueCodeDirective(
     : `This is adversarial pass ${safeRound} of ${total}; ${total - safeRound} further pass(es) will follow after you settle, so fix everything you can now.`;
 
   const delegation = recurse
-    ? "Delegate the adversarial exploration to a subagent whenever a parallel-subagent or task-delegation tool is available, so the QA runs as an independent process separate from this conversation. That subagent must run with the same model you are running as (the active/main model). Never use the model configured for /critique for this pass: that one is reserved for deep critical reviews of any subject."
+    ? "Delegate this adversarial QA to a fresh subagent that starts from context 0: it must not inherit this conversation's reasoning, assumptions or conclusions — hand it only the change under review, where to look, and the verification commands. Run it with the same model you are running as (the active/main model) whenever your delegation tool can target it (for example a sequential same-model spawn); if the tool only offers fixed per-tier models, use its most capable available tier. In every case, never use the model configured for /critique for this pass, which is reserved for deep critical reviews of any subject. Give the subagent the brief for steps 1–2 (stress and verify) with the cycle cap below; keep steps 3–4 (remediate and re-verify) for yourself. Ask it to attack the change adversarially and to return every finding with the evidence from executed checks, not opinions. The subagent runs only this QA pass: it must not delegate further and must not start an adversarial pass of its own. When it returns, reconcile its findings with your own knowledge of the change, fix everything that is real, and re-run the checks yourself — never accept or dismiss a finding without verifying it by execution."
     : "Do NOT delegate this QA pass to a subagent, parallel process, or task-delegation tool. Run the adversarial exploration inline in this conversation so it stays bounded by the rounds budget already enforced above — delegating it would let it settle in a separate session whose own `agent_settled` would trigger another autocritique pass, spawning further subagents in a self-reinforcing loop. The QA uses the same model you are running as (the active/main model); never use the model configured for /critique, which is reserved for deep critical reviews of any subject.";
 
   return [

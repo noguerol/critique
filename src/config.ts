@@ -41,13 +41,13 @@ export interface CritiqueConfig {
   /** Max verification/remediation cycles allowed inside one QA pass. */
   autocritiqueCodeIterations: AutocritiqueCodeIterations;
   /**
-   * When `true`, the autocritique-code directive tells the agent to delegate
-   * the QA pass to a subagent (the original behaviour). When `false` (default),
-   * the directive forbids delegation so the QA runs inline in the planner's
-   * session, which prevents a self-reinforcing recursion when multi-agent
-   * extensions such as trimegisto are active: a delegated QA settles in its
-   * own session, fires `agent_settled`, and would otherwise trigger another
-   * autocritique pass that spawns more subagents.
+   * When `true` (default), the autocritique-code directive delegates the QA to
+   * a fresh subagent that starts from context 0, and the main agent reconciles
+   * its findings and fixes them. When `false`, the directive forbids
+   * delegation so the QA runs inline in the planner's session. Inline is the
+   * escape hatch for multi-agent extensions such as trimegisto, where a
+   * delegated QA settles in its own session, fires `agent_settled`, and can
+   * trigger another autocritique pass that spawns more subagents.
    */
   autocritiqueCodeRecurse: boolean;
 }
@@ -63,8 +63,11 @@ export const DEFAULT_CONFIG: CritiqueConfig = {
   autocritiqueCode: false,
   autocritiqueCodeRounds: 1,
   autocritiqueCodeIterations: 1,
-  autocritiqueCodeRecurse: false,
+  autocritiqueCodeRecurse: true,
 };
+
+/** Current persisted config schema version (used to migrate legacy defaults). */
+export const CONFIG_VERSION = 2;
 
 export function configFilePath(): string {
   return join(getAgentDir(), "critique.json");
@@ -76,6 +79,20 @@ export function loadConfig(): CritiqueConfig {
     const level = raw.autoPromptCritiqueLevel;
     const modelSource = raw.autoPromptCritiqueModel;
     const frequency = raw.questionsFrequency;
+    // 1.7.0 flipped the delegation default from false to true, but saveConfig
+    // persists the whole object, so every file written while the old default
+    // held carries an explicit `autocritiqueCodeRecurse: false`. A file without
+    // a version marker predates 1.7.0: treat that legacy false as "unset" so
+    // the new default reaches existing installs. A versioned explicit false is
+    // a deliberate inline choice and is kept.
+    const rawVersion =
+      typeof (raw as { configVersion?: unknown }).configVersion === "number"
+        ? (raw as { configVersion: number }).configVersion
+        : 0;
+    const recurse =
+      rawVersion < CONFIG_VERSION && raw.autocritiqueCodeRecurse === false
+        ? undefined
+        : raw.autocritiqueCodeRecurse;
     return {
       model: typeof raw.model === "string" ? raw.model : DEFAULT_CONFIG.model,
       autoInject:
@@ -105,9 +122,7 @@ export function loadConfig(): CritiqueConfig {
       autocritiqueCodeRounds: normalizeAutocritiqueCodeRounds(raw.autocritiqueCodeRounds),
       autocritiqueCodeIterations: normalizeAutocritiqueCodeIterations(raw.autocritiqueCodeIterations),
       autocritiqueCodeRecurse:
-        typeof raw.autocritiqueCodeRecurse === "boolean"
-          ? raw.autocritiqueCodeRecurse
-          : DEFAULT_CONFIG.autocritiqueCodeRecurse,
+        typeof recurse === "boolean" ? recurse : DEFAULT_CONFIG.autocritiqueCodeRecurse,
     };
   } catch {
     return { ...DEFAULT_CONFIG };
@@ -117,7 +132,8 @@ export function loadConfig(): CritiqueConfig {
 export function saveConfig(config: CritiqueConfig): void {
   const path = configFilePath();
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(path, JSON.stringify(config, null, 2) + "\n", "utf8");
+  const persisted: Record<string, unknown> = { ...config, configVersion: CONFIG_VERSION };
+  writeFileSync(path, JSON.stringify(persisted, null, 2) + "\n", "utf8");
 }
 
 export function modelLabel(model: Model<any>): string {

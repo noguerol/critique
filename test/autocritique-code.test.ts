@@ -16,6 +16,7 @@ import {
   countTrailingAutocritiqueCodeRounds,
   decideAutocritiqueCode,
   isAutocritiqueCodePrompt,
+  isDelegatedSubagentSession,
   normalizeAutocritiqueCodeIterations,
   normalizeAutocritiqueCodeRounds,
   planAutocritiqueCode,
@@ -157,34 +158,48 @@ test("directive is scope-bounded and evidence-based", () => {
   assert.match(directive, /- Residual risk:/);
 });
 
-test("directive defaults to inline (no subagent delegation) to prevent recursion", () => {
-  // The default must forbid delegation so a delegated QA cannot spawn a
-  // recursive loop with multi-agent extensions (e.g. trimegisto).
+test("directive delegates the adversarial QA to a fresh-context subagent by default", () => {
+  // Delegation is the default: the subagent starts from context 0, reports
+  // its findings, and the main agent reconciles them and fixes what is real.
   const directive = buildAutocritiqueCodeDirective(1, 1);
+  assert.match(directive, /Delegate this adversarial QA to a fresh subagent/i);
+  assert.match(directive, /context 0/i);
+  assert.match(directive, /reconcile its findings/i);
+  assert.match(directive, /same model you are running as/i);
+  // Prompt-level recursion guard, defense in depth on top of the mechanical
+  // isDelegatedSubagentSession() check that actually stops cross-session fan-out.
+  assert.match(directive, /must not delegate further/i);
+  assert.doesNotMatch(directive, /Do NOT delegate this QA pass/i);
+});
+
+test("isDelegatedSubagentSession detects subagent processes mechanically", () => {
+  assert.equal(isDelegatedSubagentSession({}), false);
+  assert.equal(isDelegatedSubagentSession({ TRIMEGISTO_AGENT_ID: "t1a" }), true);
+  assert.equal(isDelegatedSubagentSession({ PI_CRITIQUE_SUBAGENT: "1" }), true);
+  assert.equal(isDelegatedSubagentSession({ TRIMEGISTO_AGENT_ID: "   " }), false);
+  assert.equal(isDelegatedSubagentSession({ TRIMEGISTO_AGENT_ID: "" }), false);
+});
+
+test("directive falls back to inline QA when recurse=false (trimegisto opt-out)", () => {
+  // Inline is the escape hatch for multi-agent extensions such as trimegisto,
+  // where a delegated QA may settle in its own session and recurse.
+  const directive = buildAutocritiqueCodeDirective(1, 1, 1, false);
   assert.match(directive, /Do NOT delegate this QA pass/i);
   assert.match(directive, /run the adversarial exploration inline/i);
   assert.match(directive, /self-reinforcing loop/i);
-  assert.doesNotMatch(directive, /delegate the adversarial exploration to a subagent/i);
-});
-
-test("directive allows subagent delegation when recurse=true", () => {
-  // Opt-in restores the original behaviour so users who want delegation can
-  // still get it, with the explicit caveat that this may recurse with
-  // multi-agent extensions.
-  const directive = buildAutocritiqueCodeDirective(1, 1, 1, true);
-  assert.match(directive, /delegate the adversarial exploration to a subagent/i);
+  // The model rule must hold on both branches, not only the delegated one.
   assert.match(directive, /same model you are running as/i);
-  assert.doesNotMatch(directive, /Do NOT delegate this QA pass/i);
-  assert.doesNotMatch(directive, /self-reinforcing loop/i);
+  assert.match(directive, /[Nn]ever use the model configured for \/critique/);
+  assert.doesNotMatch(directive, /Delegate this adversarial QA to a fresh subagent/i);
 });
 
-test("buildAutocritiqueCodeDirective treats an undefined recurse as inline (default)", () => {
+test("buildAutocritiqueCodeDirective treats an undefined recurse as delegation (default)", () => {
   // Explicit and implicit defaults must match: callers that don't pass the
-  // parameter must get the no-recursion directive.
-  const explicit = buildAutocritiqueCodeDirective(1, 1, 1, false);
+  // parameter must get the delegation directive.
+  const explicit = buildAutocritiqueCodeDirective(1, 1, 1, true);
   const implicit = buildAutocritiqueCodeDirective(1, 1, 1);
   assert.equal(explicit, implicit);
-  assert.match(explicit, /Do NOT delegate this QA pass/i);
+  assert.match(explicit, /Delegate this adversarial QA to a fresh subagent/i);
 });
 
 test("final directive requires an achieved summary, next steps and autonomous continuation", () => {
@@ -319,18 +334,18 @@ test("planAutocritiqueCode forwards the configured iterations to the directive",
   assert.match(fallback.directive ?? "", /Iterate at most 1 verification\/remediation cycle inside/i);
 });
 
-test("planAutocritiqueCode forwards recurse=false (default) to the directive", () => {
+test("planAutocritiqueCode delegates by default (recurse undefined)", () => {
   const plan = planAutocritiqueCode(planInput());
   assert.ok(plan.directive);
-  assert.match(plan.directive, /Do NOT delegate this QA pass/i);
-  assert.doesNotMatch(plan.directive, /delegate the adversarial exploration to a subagent/i);
+  assert.match(plan.directive, /Delegate this adversarial QA to a fresh subagent/i);
+  assert.doesNotMatch(plan.directive, /Do NOT delegate this QA pass/i);
 });
 
-test("planAutocritiqueCode forwards recurse=true to the directive", () => {
-  const plan = planAutocritiqueCode(planInput({ recurse: true }));
+test("planAutocritiqueCode forwards recurse=false (inline opt-out) to the directive", () => {
+  const plan = planAutocritiqueCode(planInput({ recurse: false }));
   assert.ok(plan.directive);
-  assert.match(plan.directive, /delegate the adversarial exploration to a subagent/i);
-  assert.doesNotMatch(plan.directive, /Do NOT delegate this QA pass/i);
+  assert.match(plan.directive, /Do NOT delegate this QA pass/i);
+  assert.doesNotMatch(plan.directive, /Delegate this adversarial QA to a fresh subagent/i);
 });
 
 test("planAutocritiqueCode restarts on a genuine user turn", () => {

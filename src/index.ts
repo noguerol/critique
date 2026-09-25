@@ -38,6 +38,7 @@ import {
 import {
   AUTOCRITIQUE_CODE_ITERATIONS,
   AUTOCRITIQUE_CODE_ROUNDS,
+  isDelegatedSubagentSession,
   normalizeAutocritiqueCodeIterations,
   normalizeAutocritiqueCodeRounds,
   planAutocritiqueCode,
@@ -607,7 +608,7 @@ function configSummary(config: ReturnType<typeof loadConfig>): string {
     ? `on (${questionsFrequencyLabel(config.questionsFrequency)})`
     : "off";
   const autocritiqueCode = config.autocritiqueCode
-    ? `on (${config.autocritiqueCodeRounds} pass${config.autocritiqueCodeRounds === 1 ? "" : "es"} × ${config.autocritiqueCodeIterations} cycle${config.autocritiqueCodeIterations === 1 ? "" : "s"}, active model${config.autocritiqueCodeRecurse ? "; subagents allowed" : "; inline"})`
+    ? `on (${config.autocritiqueCodeRounds} pass${config.autocritiqueCodeRounds === 1 ? "" : "es"} × ${config.autocritiqueCodeIterations} cycle${config.autocritiqueCodeIterations === 1 ? "" : "s"}, active model${config.autocritiqueCodeRecurse ? "; delegate" : "; inline"})`
     : "off";
   return `model:${config.model || "auto"} | inject:${config.autoInject ? "on" : "off"} | acode:${autocritiqueCode} | prompt:${promptCritique} | questions:${questions}`;
 }
@@ -645,8 +646,8 @@ function configMenuItems(config: ReturnType<typeof loadConfig>): SelectItem[] {
       value: "autocritiqueCodeRecurse",
       label: "🧩 Autocritique code recurse",
       description: config.autocritiqueCodeRecurse
-        ? "on • delegate QA to a subagent (may recurse with trimegisto)"
-        : "off • inline QA; default — prevents trimegisto recursion",
+        ? "on • delegate QA to a fresh subagent (context 0), then reconcile • default"
+        : "off • inline QA — prevents trimegisto recursion",
     },
     {
       value: "autoPromptCritique",
@@ -925,6 +926,12 @@ async function editAutocritiqueCodeIterations(
  * work, so pure chat turns are left alone.
  */
 async function maybeAutocritiqueCode(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+  // Mechanical cross-session guard (see isDelegatedSubagentSession): never
+  // inject inside a delegated subagent session. Its first prompt is the
+  // delegated task and carries no marker, so the per-session budgets cannot
+  // see the parent's pass and the QA would fan out recursively.
+  if (isDelegatedSubagentSession()) return;
+
   const config = loadConfig();
   if (!config.autocritiqueCode) return;
   if (!ctx.hasUI) return;

@@ -101,7 +101,7 @@ function decisionInput(
     idle: true,
     roundsUsed: 0,
     maxRounds: 1,
-    lastStepHasToolCalls: true,
+    lastStepChangedFiles: true,
     ...overrides,
   };
 }
@@ -123,9 +123,9 @@ test("decideAutocritiqueCode skips with an explicit reason", () => {
     run: false,
     reason: "not-idle",
   });
-  assert.deepEqual(decideAutocritiqueCode(decisionInput({ lastStepHasToolCalls: false })), {
+  assert.deepEqual(decideAutocritiqueCode(decisionInput({ lastStepChangedFiles: false })), {
     run: false,
-    reason: "no-work",
+    reason: "no-changes",
   });
   assert.deepEqual(
     decideAutocritiqueCode(decisionInput({ roundsUsed: 1, maxRounds: 1 })),
@@ -269,7 +269,7 @@ function planInput(overrides: Partial<AutocritiqueCodePlanInput> = {}): Autocrit
     idle: true,
     maxRounds: 1,
     userPrompts: ["implement the feature"],
-    lastStepHasToolCalls: true,
+    lastStepChangedFiles: true,
     injections: 0,
     ...overrides,
   };

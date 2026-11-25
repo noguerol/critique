@@ -92,6 +92,55 @@ export function countTrailingAutocritiqueCodeRounds(userPrompts: readonly string
   return count;
 }
 
+/**
+ * Tools whose successful call writes files. Read-only tools (read, grep, ls,
+ * search, memory lookups, …) never count as implementation work. Shell tools
+ * are deliberately absent: a bash call may or may not write, so its effect is
+ * measured on the workspace instead (see workspace-fingerprint.ts).
+ */
+export const FILE_MUTATING_TOOLS: ReadonlySet<string> = new Set([
+  "edit",
+  "write",
+  "multiedit",
+  "multi_edit",
+  "apply_patch",
+  "notebook_edit",
+  "notebookedit",
+]);
+
+/** Canonical tool name: lower-cased, MCP-style namespaces (`a__b__edit`) stripped. */
+export function normalizeToolName(name: string): string {
+  if (typeof name !== "string") return "";
+  const lower = name.trim().toLowerCase();
+  const sep = lower.lastIndexOf("__");
+  return sep >= 0 ? lower.slice(sep + 2) : lower;
+}
+
+/**
+ * True when the episode contains at least one file-mutating tool call that did
+ * not fail. A call whose result is flagged as an error (e.g. an edit whose
+ * oldText did not match) changed nothing; a call with no recorded result is
+ * treated as successful.
+ */
+export function hasSuccessfulFileMutation(
+  toolCalls: readonly { id: string; name: string }[],
+  toolResults: readonly { callId: string; isError: boolean }[],
+): boolean {
+  const failed = new Set(toolResults.filter((result) => result.isError).map((result) => result.callId));
+  return toolCalls.some(
+    (call) => FILE_MUTATING_TOOLS.has(normalizeToolName(call.name)) && !(call.id && failed.has(call.id)),
+  );
+}
+
+/**
+ * True only when both workspace fingerprints are known and differ. An unknown
+ * side (not a git repository, git missing or timed out) is "no evidence", so
+ * the decision falls back to the tool-call signal alone.
+ */
+export function workspaceChanged(before: string | undefined, after: string | undefined): boolean {
+  return typeof before === "string" && typeof after === "string" && before !== after;
+}
+
 export interface AutocritiqueCodeDecisionInput {
   /** Feature toggle from config. */
   enabled: boolean;
@@ -103,8 +152,11 @@ export interface AutocritiqueCodeDecisionInput {
   roundsUsed: number;
   /** Configured maximum passes per user turn. */
   maxRounds: AutocritiqueCodeRounds;
-  /** The most recent work episode performed at least one tool call. */
-  lastStepHasToolCalls: boolean;
+  /**
+   * The most recent work episode changed files: a successful file-mutating
+   * tool call, or a workspace change since the last checkpoint.
+   */
+  lastStepChangedFiles: boolean;
 }
 
 export type AutocritiqueCodeDecision =
@@ -123,7 +175,7 @@ export function decideAutocritiqueCode(input: AutocritiqueCodeDecisionInput): Au
   if (!input.hasUI) return { run: false, reason: "no-ui" };
   if (!input.idle) return { run: false, reason: "not-idle" };
   if (input.roundsUsed >= input.maxRounds) return { run: false, reason: "rounds-exhausted" };
-  if (!input.lastStepHasToolCalls) return { run: false, reason: "no-work" };
+  if (!input.lastStepChangedFiles) return { run: false, reason: "no-changes" };
   return { run: true };
 }
 
@@ -134,8 +186,8 @@ export interface AutocritiqueCodePlanInput {
   maxRounds: AutocritiqueCodeRounds;
   /** User-prompt texts from the session branch, oldest first. */
   userPrompts: readonly string[];
-  /** The newest work episode performed at least one tool call. */
-  lastStepHasToolCalls: boolean;
+  /** The newest work episode changed files (see AutocritiqueCodeDecisionInput). */
+  lastStepChangedFiles: boolean;
   /** In-memory counter, the safety net for the persistent marker count. */
   injections: number;
   /** Configured verification/remediation cycles allowed inside the pass. */
@@ -181,7 +233,7 @@ export function planAutocritiqueCode(input: AutocritiqueCodePlanInput): Autocrit
     idle: input.idle,
     roundsUsed,
     maxRounds: input.maxRounds,
-    lastStepHasToolCalls: input.lastStepHasToolCalls,
+    lastStepChangedFiles: input.lastStepChangedFiles,
   });
   if (!decision.run) {
     return { inject: false, round: 0, injections: Math.max(0, Math.trunc(input.injections) || 0) };

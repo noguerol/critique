@@ -38,11 +38,14 @@ import {
 import {
   AUTOCRITIQUE_CODE_ITERATIONS,
   AUTOCRITIQUE_CODE_ROUNDS,
+  hasSuccessfulFileMutation,
   isDelegatedSubagentSession,
   normalizeAutocritiqueCodeIterations,
   normalizeAutocritiqueCodeRounds,
   planAutocritiqueCode,
+  workspaceChanged,
 } from "./autocritique-code.ts";
+import { workspaceFingerprint } from "./workspace-fingerprint.ts";
 
 type Mode = "config" | "review" | "view";
 
@@ -113,6 +116,48 @@ type QuestionAction = "a" | "b" | "c" | "dismiss";
  * catches any marker-detection miss. Reset on every genuine user turn.
  */
 let autocritiqueCodeInjections = 0;
+
+/**
+ * Git working-tree fingerprint at the last checkpoint (genuine user input or
+ * the previous settle). A different fingerprint at settle time means the turn
+ * changed files even without an edit/write tool call (e.g. via bash).
+ * `undefined` when the cwd is not a git work tree or git failed.
+ */
+let workspaceCheckpoint: string | undefined;
+/**
+ * Bumped by every checkpoint writer. An async fingerprint only commits if no
+ * newer writer started meanwhile, so a slow settle can never overwrite the
+ * fresher checkpoint of an input that arrived while it was running.
+ */
+let workspaceCheckpointGeneration = 0;
+
+function fingerprintWorkspace(pi: ExtensionAPI, ctx: ExtensionContext): Promise<string | undefined> {
+  return workspaceFingerprint((command, args, options) => pi.exec(command, args, options), ctx.cwd);
+}
+
+/**
+ * Take a workspace checkpoint when a new turn starts from idle (any source:
+ * user prompts, other extensions' messages, the QA directive itself), so
+ * changes made between turns are never attributed to the next turn. Messages
+ * delivered mid-run (steer/followUp) are skipped: the running turn's changes
+ * are still being made and must stay attributable to it.
+ */
+async function checkpointWorkspaceAtTurnStart(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  streamingBehavior: "steer" | "followUp" | undefined,
+): Promise<void> {
+  if (streamingBehavior !== undefined) return;
+  const generation = ++workspaceCheckpointGeneration;
+  if (!loadConfig().autocritiqueCode || isDelegatedSubagentSession()) {
+    // Never keep a stale checkpoint while the feature is off: enabling it
+    // mid-session then starts from "no evidence" instead of a false positive.
+    workspaceCheckpoint = undefined;
+    return;
+  }
+  const fingerprint = await fingerprintWorkspace(pi, ctx);
+  if (generation === workspaceCheckpointGeneration) workspaceCheckpoint = fingerprint;
+}
 
 const MAX_VISIBLE_MODELS = 10;
 const PROMPT_CRITIQUE_TIMEOUT_MS = 30_000;
@@ -629,7 +674,7 @@ function configMenuItems(config: ReturnType<typeof loadConfig>): SelectItem[] {
       value: "autocritiqueCode",
       label: "🛡️ Autocritique code",
       description: config.autocritiqueCode
-        ? `on • ${config.autocritiqueCodeRounds} round${config.autocritiqueCodeRounds === 1 ? "" : "s"} × ${config.autocritiqueCodeIterations} cycle${config.autocritiqueCodeIterations === 1 ? "" : "s"} QA after each turn (active model)`
+        ? `on • ${config.autocritiqueCodeRounds} round${config.autocritiqueCodeRounds === 1 ? "" : "s"} × ${config.autocritiqueCodeIterations} cycle${config.autocritiqueCodeIterations === 1 ? "" : "s"} QA after each turn that changes files (active model)`
         : "off • no automatic code QA",
     },
     {
@@ -922,8 +967,10 @@ async function editAutocritiqueCodeIterations(
 
 /**
  * After the working agent fully settles, inject one bounded adversarial QA pass
- * when autocritique-code is enabled. Skipped unless the last episode did real
- * work, so pure chat turns are left alone.
+ * when autocritique-code is enabled. Skipped unless the last episode changed
+ * files — a successful edit/write-style tool call, or a git working-tree change
+ * since the last checkpoint — so chat and read-only investigation turns
+ * (read, grep, search, read-only bash) are left alone.
  */
 async function maybeAutocritiqueCode(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
   // Mechanical cross-session guard (see isDelegatedSubagentSession): never
@@ -940,13 +987,25 @@ async function maybeAutocritiqueCode(pi: ExtensionAPI, ctx: ExtensionContext): P
   const { listUserPrompts, extractLatestStep } = await import("./work-step.ts");
   const latestStep = extractLatestStep(branch);
 
+  const previousWorkspace = workspaceCheckpoint;
+  const generation = ++workspaceCheckpointGeneration;
+  const currentWorkspace = await fingerprintWorkspace(pi, ctx);
+  // A new turn started while git was running: this settle is stale. Leave the
+  // newer checkpoint, the rounds counter and the conversation untouched.
+  if (generation !== workspaceCheckpointGeneration) return;
+  const lastStepChangedFiles =
+    (latestStep ? hasSuccessfulFileMutation(latestStep.toolCalls, latestStep.toolResults) : false) ||
+    workspaceChanged(previousWorkspace, currentWorkspace);
+  // Advance the checkpoint so a later pass only sees changes made after this settle.
+  workspaceCheckpoint = currentWorkspace;
+
   const plan = planAutocritiqueCode({
     enabled: config.autocritiqueCode,
     hasUI: ctx.hasUI,
     idle: ctx.isIdle(),
     maxRounds: config.autocritiqueCodeRounds,
     userPrompts: listUserPrompts(branch),
-    lastStepHasToolCalls: (latestStep?.toolCalls.length ?? 0) > 0,
+    lastStepChangedFiles,
     injections: autocritiqueCodeInjections,
     iterations: config.autocritiqueCodeIterations,
     recurse: config.autocritiqueCodeRecurse,
@@ -1009,6 +1068,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("input", async (event, ctx) => {
+    await checkpointWorkspaceAtTurnStart(pi, ctx, event.streamingBehavior);
     if (event.source === "extension") return { action: "continue" as const };
 
     // A genuine user turn resets the autocritique-code budget.

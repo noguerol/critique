@@ -11,6 +11,12 @@
  * so a second edit to an already-modified file still changes it. Every git
  * call is read-only (`--no-optional-locks`, `hash-object` without `-w`).
  *
+ * Cost matters: this runs on a turn boundary, so the untracked list is taken
+ * from the same `git status -z` call instead of a second `git ls-files` (both
+ * walk the whole tree), and the remaining queries run in parallel. Callers that
+ * can decide from the tool-call signal alone should not call this at all (see
+ * needsWorkspaceFingerprint in autocritique-code.ts).
+ *
  * `undefined` means "no evidence": not a git work tree, git missing, a failed
  * or timed-out call. Callers must then fall back to the tool-call signal.
  *
@@ -33,6 +39,31 @@ export type FingerprintExec = (
 ) => Promise<FingerprintExecResult>;
 
 const GIT_TIMEOUT_MS = 5_000;
+
+/**
+ * Untracked paths from `git status --porcelain=v1 -z --untracked-files=all`.
+ *
+ * In `-z` mode fields are NUL-separated and never quoted: each entry is
+ * `XY <path>`, and a rename/copy entry (X is `R` or `C`) is followed by one
+ * extra field holding the origin path, which is skipped so it can never be
+ * mistaken for an entry of its own. Only `??` entries (untracked, honouring
+ * .gitignore) are returned.
+ */
+export function untrackedFilesFromStatus(status: string): string[] {
+  if (typeof status !== "string" || !status) return [];
+  const fields = status.split("\0");
+  const untracked: string[] = [];
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i];
+    // "XY" + space + at least one path character.
+    if (field.length < 4 || field.charAt(2) !== " ") continue;
+    const code = field.slice(0, 2);
+    const path = field.slice(3);
+    if (code.charAt(0) === "R" || code.charAt(0) === "C") i += 1;
+    if (code === "??") untracked.push(path);
+  }
+  return untracked;
+}
 /** Untracked files hashed per `git hash-object` call (keeps argv bounded). */
 const HASH_CHUNK = 200;
 /** Beyond this many untracked files only their names/count are fingerprinted. */
@@ -67,15 +98,14 @@ export async function workspaceFingerprint(
 
   // Independent read-only queries run in parallel to keep turn latency down.
   const diffFlags = ["--no-ext-diff", "--no-textconv", "--binary", "--no-color"];
-  const [status, untrackedList, ...diffs] = await Promise.all([
+  const [status, ...diffs] = await Promise.all([
     git(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
-    git(root, ["ls-files", "--others", "--exclude-standard", "-z"]),
     ...(headSha
       ? [git(root, ["diff", "HEAD", ...diffFlags])]
       : [git(root, ["diff", "--cached", ...diffFlags]), git(root, ["diff", ...diffFlags])]),
   ]);
-  if (!ok(status) || !ok(untrackedList) || !diffs.every(ok)) return undefined;
-  const untracked = untrackedList.stdout.split("\0").filter(Boolean);
+  if (!ok(status) || !diffs.every(ok)) return undefined;
+  const untracked = untrackedFilesFromStatus(status.stdout);
 
   const untrackedHashes: string[] = [];
   const hashed = untracked.slice(0, MAX_HASHED_UNTRACKED);

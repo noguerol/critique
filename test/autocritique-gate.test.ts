@@ -13,12 +13,17 @@ import { join } from "node:path";
 
 import {
   hasSuccessfulFileMutation,
+  needsWorkspaceFingerprint,
   normalizeToolName,
   planAutocritiqueCode,
   workspaceChanged,
 } from "../src/autocritique-code.ts";
 import { extractLatestStep, listUserPrompts } from "../src/work-step.ts";
-import { workspaceFingerprint, type FingerprintExec } from "../src/workspace-fingerprint.ts";
+import {
+  untrackedFilesFromStatus,
+  workspaceFingerprint,
+  type FingerprintExec,
+} from "../src/workspace-fingerprint.ts";
 
 const call = (id: string, name: string) => ({ id, name });
 const result = (callId: string, isError = false) => ({ callId, isError });
@@ -52,6 +57,56 @@ test("normalizeToolName and workspaceChanged edge cases", () => {
   assert.equal(workspaceChanged("a", undefined), false);
   assert.equal(workspaceChanged("a", "a"), false);
   assert.equal(workspaceChanged("a", "b"), true);
+});
+
+test("MCP filesystem tool aliases count, read-only look-alikes do not", () => {
+  for (const name of [
+    "write_file",
+    "edit_file",
+    "create_file",
+    "str_replace_editor",
+    "replace_in_file",
+    "apply_diff",
+    "delete_file",
+    "multi_write",
+  ]) {
+    assert.equal(hasSuccessfulFileMutation([call("1", name)], []), true, name);
+  }
+  for (const name of ["read_file", "list_files", "search_files", "get_file_info", "grep", "bash", "write_log"]) {
+    assert.equal(hasSuccessfulFileMutation([call("1", name)], []), false, name);
+  }
+  assert.equal(hasSuccessfulFileMutation([call("1", "mcp__fs__write_file")], []), true, "namespaced alias");
+});
+
+test("the workspace probe only runs when the tool signal cannot decide", () => {
+  // A pure chat turn and a turn that already edited files need no git round trip.
+  assert.equal(needsWorkspaceFingerprint(0, false), false);
+  assert.equal(needsWorkspaceFingerprint(0, true), false);
+  assert.equal(needsWorkspaceFingerprint(1, true), false);
+  // Ambiguous: tool calls happened, none of them provably wrote files.
+  assert.equal(needsWorkspaceFingerprint(1, false), true);
+  assert.equal(needsWorkspaceFingerprint(7, false), true);
+  // Defensive: junk counts are treated as "no tool calls".
+  assert.equal(needsWorkspaceFingerprint(Number.NaN, false), false);
+  assert.equal(needsWorkspaceFingerprint(-3, false), false);
+});
+
+test("untrackedFilesFromStatus parses porcelain -z entries", () => {
+  assert.deepEqual(untrackedFilesFromStatus(""), []);
+  assert.deepEqual(
+    untrackedFilesFromStatus("?? a.txt\0?? dir/new file.txt\0?? odd\nname.txt\0"),
+    ["a.txt", "dir/new file.txt", "odd\nname.txt"],
+  );
+  // Tracked entries are not untracked; a rename carries an extra origin field
+  // that must not be read as an entry of its own.
+  assert.deepEqual(untrackedFilesFromStatus(" M a.txt\0R  new.txt\0old.txt\0A  staged.txt\0"), []);
+  assert.deepEqual(untrackedFilesFromStatus("R  new.txt\0old.txt\0?? tail.txt\0"), ["tail.txt"]);
+  // Index-status rename (X position) and copy both skip their origin field.
+  assert.deepEqual(untrackedFilesFromStatus("RM dir/new.txt\0dir/old.txt\0?? keep.txt\0"), ["keep.txt"]);
+  assert.deepEqual(untrackedFilesFromStatus("C  copy.txt\0src.txt\0"), []);
+  assert.deepEqual(untrackedFilesFromStatus("!! ignored.log\0"), []);
+  // Malformed fragments are ignored instead of throwing.
+  assert.deepEqual(untrackedFilesFromStatus("??\0x\0 "), []);
 });
 
 // --- planAutocritiqueCode over real episode extraction ----------------------
@@ -150,6 +205,38 @@ test("workspaceFingerprint tracks file changes without writing the index", async
   assert.notEqual(m3, m2, "new untracked file with an odd name");
   writeFileSync(join(repo, "ignored.log"), "noise\n");
   assert.equal(await workspaceFingerprint(exec, repo), m3, "ignored files do not count");
+});
+
+test("workspaceFingerprint sees nested untracked files and staged renames", async (t) => {
+  const scratch = mkdtempSync(join(tmpdir(), "critique-fp2-"));
+  t.after(() => rmSync(scratch, { recursive: true, force: true }));
+  const repo = join(scratch, "repo");
+  mkdirSync(repo);
+  git(repo, "init", "-q");
+  git(repo, "config", "user.email", "t@example.invalid");
+  git(repo, "config", "user.name", "t");
+  writeFileSync(join(repo, "old.txt"), "one\n");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-qm", "init");
+  const base = await workspaceFingerprint(exec, repo);
+
+  // A brand-new directory whose single file is untracked (status -uall must
+  // list the file, not just the directory).
+  mkdirSync(join(repo, "deep", "er"), { recursive: true });
+  writeFileSync(join(repo, "deep", "er", "n.txt"), "a\n");
+  const nested = await workspaceFingerprint(exec, repo);
+  assert.notEqual(nested, base, "nested untracked file");
+  writeFileSync(join(repo, "deep", "er", "n.txt"), "b\n");
+  assert.notEqual(await workspaceFingerprint(exec, repo), nested, "content change of an untracked file");
+
+  // A staged rename (extra origin field in porcelain -z) is a change too.
+  const beforeRename = await workspaceFingerprint(exec, repo);
+  git(repo, "mv", "old.txt", "renamed.txt");
+  const staged = await workspaceFingerprint(exec, repo);
+  assert.notEqual(staged, beforeRename, "staged rename");
+  // The origin path of the rename must not be hashed as a file of its own:
+  // the fingerprint has to stay stable while nothing else changes.
+  assert.equal(await workspaceFingerprint(exec, repo), staged, "stable after rename");
 });
 
 test("workspaceFingerprint degrades to undefined on git failures", async () => {

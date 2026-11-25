@@ -40,6 +40,7 @@ import {
   AUTOCRITIQUE_CODE_ROUNDS,
   hasSuccessfulFileMutation,
   isDelegatedSubagentSession,
+  needsWorkspaceFingerprint,
   normalizeAutocritiqueCodeIterations,
   normalizeAutocritiqueCodeRounds,
   planAutocritiqueCode,
@@ -971,6 +972,10 @@ async function editAutocritiqueCodeIterations(
  * files — a successful edit/write-style tool call, or a git working-tree change
  * since the last checkpoint — so chat and read-only investigation turns
  * (read, grep, search, read-only bash) are left alone.
+ *
+ * The git probe is lazy: it runs only for episodes that called some tool but
+ * none that writes files (a bash-only turn, an investigation turn), which
+ * keeps chat turns and ordinary edit turns free of any git cost.
  */
 async function maybeAutocritiqueCode(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
   // Mechanical cross-session guard (see isDelegatedSubagentSession): never
@@ -986,18 +991,24 @@ async function maybeAutocritiqueCode(pi: ExtensionAPI, ctx: ExtensionContext): P
   const branch = ctx.sessionManager.getBranch();
   const { listUserPrompts, extractLatestStep } = await import("./work-step.ts");
   const latestStep = extractLatestStep(branch);
-
-  const previousWorkspace = workspaceCheckpoint;
-  const generation = ++workspaceCheckpointGeneration;
-  const currentWorkspace = await fingerprintWorkspace(pi, ctx);
-  // A new turn started while git was running: this settle is stale. Leave the
-  // newer checkpoint, the rounds counter and the conversation untouched.
-  if (generation !== workspaceCheckpointGeneration) return;
-  const lastStepChangedFiles =
-    (latestStep ? hasSuccessfulFileMutation(latestStep.toolCalls, latestStep.toolResults) : false) ||
-    workspaceChanged(previousWorkspace, currentWorkspace);
-  // Advance the checkpoint so a later pass only sees changes made after this settle.
-  workspaceCheckpoint = currentWorkspace;
+  // The tool-call signal is free; the workspace probe costs a git round trip, so
+  // it only runs when the call list cannot answer the question on its own
+  // (a pure chat turn and a turn that already edited files are both settled).
+  const fileMutation = latestStep
+    ? hasSuccessfulFileMutation(latestStep.toolCalls, latestStep.toolResults)
+    : false;
+  let lastStepChangedFiles = fileMutation;
+  if (latestStep && needsWorkspaceFingerprint(latestStep.toolCalls.length, fileMutation)) {
+    const generation = ++workspaceCheckpointGeneration;
+    const currentWorkspace = await fingerprintWorkspace(pi, ctx);
+    // A new turn started while git was running: this settle is stale. Leave the
+    // newer checkpoint, the rounds counter and the conversation untouched.
+    if (generation !== workspaceCheckpointGeneration) return;
+    lastStepChangedFiles = workspaceChanged(workspaceCheckpoint, currentWorkspace);
+    // Advance the checkpoint so a later pass only sees changes made after this
+    // settle. When the probe is skipped the next turn start re-checkpoints.
+    workspaceCheckpoint = currentWorkspace;
+  }
 
   const plan = planAutocritiqueCode({
     enabled: config.autocritiqueCode,

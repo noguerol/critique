@@ -97,15 +97,45 @@ export function countTrailingAutocritiqueCodeRounds(userPrompts: readonly string
  * search, memory lookups, …) never count as implementation work. Shell tools
  * are deliberately absent: a bash call may or may not write, so its effect is
  * measured on the workspace instead (see workspace-fingerprint.ts).
+ *
+ * The built-in pi tools are `edit` and `write`; the rest are aliases used by
+ * common external/MCP filesystem tools (`write_file`, `str_replace_editor`, …)
+ * so the gate still works outside a git work tree, where the workspace probe
+ * has nothing to compare. Names are matched after normalizeToolName.
  */
 export const FILE_MUTATING_TOOLS: ReadonlySet<string> = new Set([
+  // pi built-ins and their multi-edit spellings
   "edit",
   "write",
   "multiedit",
   "multi_edit",
+  "multiwrite",
+  "multi_write",
+  // patch-style tools
   "apply_patch",
+  "apply_diff",
+  "patch_file",
+  // notebook editors
   "notebook_edit",
   "notebookedit",
+  // MCP / external filesystem tools (filesystem-, Cline-, OpenHands-style)
+  "write_file",
+  "write_to_file",
+  "edit_file",
+  "create_file",
+  "append_file",
+  "prepend_file",
+  "insert_file",
+  "insert_content",
+  "replace_in_file",
+  "str_replace",
+  "str_replace_editor",
+  "str_replace_based_edit_tool",
+  "delete_file",
+  "remove_file",
+  "move_file",
+  "rename_file",
+  "copy_file",
 ]);
 
 /** Canonical tool name: lower-cased, MCP-style namespaces (`a__b__edit`) stripped. */
@@ -139,6 +169,22 @@ export function hasSuccessfulFileMutation(
  */
 export function workspaceChanged(before: string | undefined, after: string | undefined): boolean {
   return typeof before === "string" && typeof after === "string" && before !== after;
+}
+
+/**
+ * Whether the workspace probe (an extra git round trip per turn boundary) is
+ * worth running for an episode.
+ *
+ * - A successful file-mutating tool call already answers the question: the
+ *   turn changed files, so the probe cannot flip the decision.
+ * - A turn with no tool calls at all cannot have touched the workspace (a
+ *   pure chat turn), so the probe cannot flip it either.
+ * - Everything else is ambiguous: a `bash` call, a read-only investigation, a
+ *   code generator. Only there does the fingerprint decide.
+ */
+export function needsWorkspaceFingerprint(toolCallCount: number, hasFileMutation: boolean): boolean {
+  const count = typeof toolCallCount === "number" && Number.isFinite(toolCallCount) ? toolCallCount : 0;
+  return count > 0 && !hasFileMutation;
 }
 
 export interface AutocritiqueCodeDecisionInput {

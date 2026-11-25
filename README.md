@@ -203,7 +203,7 @@ The sensitivity of the Questions feature is controlled by the **Questions freque
 
 ### 6. Optional autocritique-code (post-implementation adversarial QA)
 
-When enabled, Critique listens to `agent_settled` — the point where pi will not auto-retry, compact or continue — and, once the agent has finished a turn that actually changed files, injects one adversarial QA directive as a follow-up user message. A turn counts as changing files when its last work episode contains a successful file-mutating tool call (`edit`, `write`, `multi_edit`, `apply_patch`, `notebook_edit`; MCP namespaces are stripped) or when the git working-tree fingerprint (HEAD, status, tracked diff, untracked file hashes) differs from the checkpoint taken at the last genuine user input or settle, which catches writes made through bash. The checkpoint is taken whenever a turn starts from idle (from any source) and after every settle; messages sent while the agent is still running (steer/follow-up) do not move it, so the running turn's changes stay attributed to it. Chat turns and read-only investigation (read, grep, search, read-only bash) are left untouched. Limits: outside a git work tree only the tool-call signal is available; HEAD-moving git operations (commit, stash, reset) count as changes; only the first 2000 untracked files are content-hashed; edits inside an already-dirty submodule are not seen; changes outside the session cwd's repository are not seen.
+When enabled, Critique listens to `agent_settled` — the point where pi will not auto-retry, compact or continue — and, once the agent has finished a turn that actually changed files, injects one adversarial QA directive as a follow-up user message. A turn counts as changing files when its last work episode contains a successful file-mutating tool call (`edit`, `write`, `multi_edit`, `apply_patch`, `notebook_edit`, plus the common `write_file`/`edit_file`/`str_replace_editor`-style MCP aliases; case-insensitive, MCP namespaces stripped, calls whose result `isError` ignored) or when the git working-tree fingerprint (HEAD, status, tracked diff, untracked file hashes) differs from the checkpoint taken at the last genuine user input or settle, which catches writes made through bash. The fingerprint is lazy: it only runs for episodes that called some tool but none that writes files, so chat turns and ordinary edit turns cost no git round trip. The checkpoint is taken whenever a turn starts from idle (from any source) and after every probe; messages sent while the agent is still running (steer/follow-up) do not move it, so the running turn's changes stay attributed to it. Chat turns and read-only investigation (read, grep, search, read-only bash) are left untouched. Limits: outside a git work tree only the tool-call signal is available; HEAD-moving git operations (commit, stash, reset) count as changes; only the first 2000 untracked files are content-hashed; edits inside an already-dirty submodule are not seen; changes outside the session cwd's repository are not seen.
 
 The improved directive replaces the original "loop until 100% clean" idea with something bounded and safe:
 
@@ -277,12 +277,13 @@ critique/
     ├── index.ts             # /critique command surface, config UI, review UI, input + agent_settled hooks
     ├── config.ts            # persistence + model resolution: pinned, auto, fallback
     ├── autocritique-code.ts # post-implementation adversarial QA: directive builder + anti-loop policy
+    ├── workspace-fingerprint.ts # read-only git working-tree fingerprint for "did this turn change files?"
     ├── prompt-critique.ts   # automatic user-prompt critique prompt, gate, model call, questions detection
     ├── work-step.ts         # episode splitting + token-budgeted serialization
     └── review.ts            # reviewer prompt + model call + injected-message builder
 ```
 
-Six-file extension with zero external dependencies (only pi's bundled `@earendil-works/*` + Node built-ins):
+Seven-file extension with zero runtime dependencies (only pi's bundled `@earendil-works/*` + Node built-ins; `typescript` is a dev dependency for `npm run typecheck`):
 
 - **Episode splitter** — splits a session branch into user-message-bounded episodes, picks the last one with work
 - **Token budgeter** — hard caps per field, marks truncations so the reviewer knows what it didn't see
@@ -290,7 +291,7 @@ Six-file extension with zero external dependencies (only pi's bundled `@earendil
 - **Advisory formatter** — wraps the review in a "non-mandatory" envelope before injecting as a follow-up user message
 - **Prompt critique** — optional input hook with local trivial-prompt gate, three challenge levels, and ultra-short JSON model output
 - **Questions detection** — size gate + tool-free model judgment of genuine ambiguity (generic "part vs whole"-style readings explicitly banned), three frequency levels; shows a clarifying widget with A/B/C options
-- **autocritique-code** — pure directive builder + anti-loop policy driven by the `agent_settled` event; counts its own markers in the session branch, applies a 1–3 pass budget and a configurable 1–5 cycle budget per pass, and skips turns that changed no files
+- **autocritique-code** — pure directive builder + anti-loop policy driven by the `agent_settled` event; counts its own markers in the session branch, applies a 1–3 pass budget and a configurable 1–5 cycle budget per pass, and skips turns that changed no files. The change signal is a pure decision (`hasSuccessfulFileMutation`, `needsWorkspaceFingerprint`, `workspaceChanged`) plus a read-only git fingerprint (`src/workspace-fingerprint.ts`) used only where the tool list is inconclusive
 - **UI** — lazy-loaded pickers/viewers/loaders + 30-second Critique widget + 30-second Questions widget
 
 ## Notes
@@ -300,6 +301,10 @@ Six-file extension with zero external dependencies (only pi's bundled `@earendil
 - Provider errors (bad keys, insufficient balance, rate limit) are surfaced as errors instead of silently producing empty reviews.
 - Reviews are capped at 16,000 chars to keep the injected follow-up reasonable; longer reviews are truncated with `… [review truncated]`.
 - autocritique-code only runs in dialog-capable modes (TUI/RPC) and only after a turn that changed files (successful edit/write-style tool call, or a git working-tree change; outside git, bash-only writes are not detected). Each injected pass is a real user message, so it gets its own work episode and never contaminates the previous one during a later manual `/critique`. By default the QA is delegated to a fresh subagent (context 0) and the main agent reconciles and fixes its findings; set `autocritiqueCodeRecurse: false` to run it inline, which is the safe choice with multi-agent extensions such as trimegisto (a delegated QA can otherwise cause a self-reinforcing recursion loop unless the extension itself cooperates with critique's anti-loop marker).
+
+## Development
+
+Node ≥ 22.6 (native TypeScript stripping). `npm test` runs the unit suites with `node --test`, `npm run typecheck` runs `tsc --noEmit` over `src/` and `test/` (once `npm install` has pulled the dev dependencies), and `npm run check` runs both. The pure policy modules (`autocritique-code.ts`, `work-step.ts`, `workspace-fingerprint.ts`) have no pi runtime dependency, so they are testable directly; the `input`/`agent_settled` wiring in `index.ts` needs the pi runtime.
 
 ## License
 
